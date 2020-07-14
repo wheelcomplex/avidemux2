@@ -153,6 +153,7 @@ int decoderFFVDPAU::getBuffer(AVCodecContext *avctx, AVFrame *pic)
         ADM_info("[VDPAU] No more available surface, creating a new one\n");
         render=new ADM_vdpauRenderState;
         memset(render,0,sizeof( ADM_vdpauRenderState));
+        render->surface=VDP_INVALID_HANDLE;
         int widthToUse = admVdpau::dimensionRoundUp(avctx->coded_width);
         int heightToUse= admVdpau::dimensionRoundUp(avctx->coded_height);
         if(VDP_STATUS_OK!=admVdpau::surfaceCreate(widthToUse,heightToUse,&(render->surface)))
@@ -162,8 +163,6 @@ int decoderFFVDPAU::getBuffer(AVCodecContext *avctx, AVFrame *pic)
             alive=false;
             return -1;
         }
-        render->state=0;
-        vdpauMarkSurfaceUsed(&vdpau,(void *)render);
         surfaceMutex.lock();
         vdpau.fullQueue.push_back(render);
         surfaceMutex.unlock();
@@ -337,7 +336,7 @@ decoderFFVDPAU::~decoderFFVDPAU()
             ADM_vdpauRenderState *r=vdpau.fullQueue[i];
             if(r)
             {
-                if(r->surface)
+                if(r->surface!=VDP_INVALID_HANDLE)
                 {
                         if(VDP_STATUS_OK!=admVdpau::surfaceDestroy((r->surface)))
                                 ADM_error("Error destroying surface %d\n",i);
@@ -360,7 +359,7 @@ bool decoderFFVDPAU::uncompress (ADMCompressedImage * in, ADMImage * out)
             out->refType=ADM_HW_NONE;
     }
 
-    if (!in->dataLength )	// Null frame, silently skipped
+    if(!_parent->getDrainingState() && !in->dataLength) // Null frame, silently skipped
     {
         out->_noPicture = 1;
         out->Pts=ADM_COMPRESSED_NO_PTS;
@@ -371,18 +370,10 @@ bool decoderFFVDPAU::uncompress (ADMCompressedImage * in, ADMImage * out)
    // Put a safe value....
     out->Pts=in->demuxerPts;
     _context->reordered_opaque=in->demuxerPts;
-    int got_picture;
-    AVPacket pkt;
-    av_init_packet(&pkt);
-    pkt.data=in->data;
-    pkt.size=in->dataLength;
-    if(in->flags&AVI_KEY_FRAME)
-        pkt.flags=AV_PKT_FLAG_KEY;
-    else
-        pkt.flags=0;
 
     AVFrame *frame=_parent->getFramePointer();
     ADM_assert(frame);
+
     if(_parent->getDrainingState())
     {
         if(_parent->getDrainingInitiated()==false)
@@ -390,9 +381,21 @@ bool decoderFFVDPAU::uncompress (ADMCompressedImage * in, ADMImage * out)
             avcodec_send_packet(_context, NULL);
             _parent->setDrainingInitiated(true);
         }
+    }else if(!handover)
+    {
+        AVPacket pkt;
+        av_init_packet(&pkt);
+        pkt.data=in->data;
+        pkt.size=in->dataLength;
+        if(in->flags&AVI_KEY_FRAME)
+            pkt.flags=AV_PKT_FLAG_KEY;
+        else
+            pkt.flags=0;
+
+        avcodec_send_packet(_context, &pkt);
     }else
     {
-        avcodec_send_packet(_context, &pkt);
+        handover=false;
     }
 
     int ret = avcodec_receive_frame(_context, frame);

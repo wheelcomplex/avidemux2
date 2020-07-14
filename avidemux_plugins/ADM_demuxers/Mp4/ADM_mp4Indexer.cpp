@@ -418,7 +418,7 @@ uint32_t i,j,cur;
         uint64_t total=0;
         double   ftot;
         uint32_t thisone,previous=0;
-        uint32_t step=1;
+        uint32_t step=0xFFFFFFFF;
         bool constantFps=true;
 
         // try to correct jitter from rounding errors first
@@ -428,6 +428,8 @@ uint32_t i,j,cur;
             for(uint32_t i=0;i<nbChunk;i++)
             {
                 thisone=track->index[i].dts;
+                if(!thisone) continue;
+                if(thisone<step) step=thisone;
                 if(thisone<100) continue; // ignore too low durations
                 if(hist.find(thisone)==hist.end())
                     hist.insert({thisone,1});
@@ -461,6 +463,7 @@ uint32_t i,j,cur;
                         for(uint32_t i=0;i<nbChunk;i++)
                             track->index[i].dts=b;
                         ADM_info("Yes, enforcing CFR, frame duration %u ticks.\n",b);
+                        step=b;
                         restored=true;
                     }
                 }
@@ -468,29 +471,17 @@ uint32_t i,j,cur;
                     ADM_info("No, nothing we can do.\n");
             }
         }
+        if(step==0xFFFFFFFF) step=1;
 
         for(uint32_t i=0;i<nbChunk;i++)
         {
             thisone=track->index[i].dts;
             if(!isAudio && i+1<nbChunk)
             {
-                if(!i)
-                    step=thisone;
-                if(i && step>1 && thisone!=previous && thisone && previous)
-                {
+                while(thisone%step)
+                    step=thisone%step;
+                if(constantFps && i && thisone!=previous && thisone && previous)
                     constantFps=false;
-                    if(thisone>previous)
-                    {
-                        if(thisone%previous)
-                            step=1;
-                    }else
-                    {
-                        if(previous%thisone)
-                            step=1;
-                        else if(step>thisone)
-                            step=thisone;
-                    }
-                }
                 previous=thisone;
             }
             ftot=total;
@@ -513,6 +504,7 @@ uint32_t i,j,cur;
         }
         // Time is now built, it is in us
         ADM_info("Video index done.\n");
+        _videoFound++;
         ADM_info("Setting video timebase to %u / %u\n",step,_videoScale);
         _videostream.dwScale=step;
         if(constantFps)
@@ -525,6 +517,22 @@ uint32_t i,j,cur;
         ftot*=1000.*1000.;
         ftot/=trackScale;
         ftot+=0.49;
+        /* If the frame increment calculated from the time base is close to the average,
+        the stream may be a constant fps stream with a mixture of frames and fields or
+        simply have holes. The average is meaningless then. */
+        if(step && _videoScale)
+        {
+            double ti=1000.*1000.;
+            ti/=_videoScale;
+            ti*=step;
+            ti+=0.49;
+            if(ftot<ti*2)
+            {
+                _mainaviheader.dwMicroSecPerFrame=(int32_t)ti;
+                ADM_info("Using time base for frame increment %d us instead of average %d\n",(int32_t)ti,(int32_t)ftot);
+                return true;
+            }
+        }
         _mainaviheader.dwMicroSecPerFrame=(int32_t)ftot;
         ADM_info("Variable frame rate, %d us per frame on average.\n",_mainaviheader.dwMicroSecPerFrame);
 

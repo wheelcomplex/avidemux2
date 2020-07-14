@@ -40,27 +40,23 @@ uint8_t psHeader::open(const char *name)
     sprintf(idxName,"%s.idx2",name);
     if(!ADM_fileExist(idxName))
         r=psIndexer(name);
-    if(r==ADM_IGN)
+    if(r!=ADM_OK)
     {
-        ADM_warning("Indexing cancelled by the user, deleting the index file. Bye.\n");
-        if(!ADM_eraseFile(idxName))
+        if(r==ADM_IGN)
+            ADM_warning("Indexing cancelled by the user, deleting the index file. Bye.\n");
+        if(!r)
+            ADM_error("Indexing of %s failed, aborting\n",name);
+        if(ADM_fileExist(idxName) && !ADM_eraseFile(idxName))
             ADM_warning("Could not delete %s\n",idxName);
         free(idxName);
         return r;
     }
-    if(!r)
-    {
-        ADM_error("Indexing of %s failed, aborting\n",name);
-        // Currently, indexer returns 0 only if it can't create the .idx2 file, nothing to remove.
-        free(idxName);
-        return r;
-    }
 
-    FP_TYPE appendType=FP_DONT_APPEND;
     char *type;
     uint64_t startDts;
     uint32_t version=0;
     bool reindex=false;
+    int append=PS_DEFAULT_FRAGMENT_SIZE;
     indexFile index;
     r=0;
 
@@ -89,10 +85,10 @@ uint8_t psHeader::open(const char *name)
         printf("[psDemux] Incorrect or not found type\n");
         goto abt;
     }
-    append=(bool)index.getAsUint32("Append");
+    if(!index.getAsUint32("Append"))
+        append=0;
     printf("[psDemux] Append=%" PRIu32"\n",append);
-    if(append) appendType=FP_APPEND;
-    if(!parser.open(name,&appendType))
+    if(!parser.open(name,&append))
     {
         printf("[psDemux] Cannot open root file %s\n",name);
         goto abt;
@@ -139,13 +135,53 @@ uint8_t psHeader::open(const char *name)
                   listOfAudioTracks[i]->access->setScrGapList(&listOfScrGap) ;
     }
     updatePtsDts();
+    {
+    uint32_t fps=_videostream.dwRate;
+    switch(fps)
+    {
+        case 23976:
+            _videostream.dwScale=1001;
+            _videostream.dwRate=24000;
+            break;
+        case 29970:
+            _videostream.dwScale=1001;
+            _videostream.dwRate=30000;
+            break;
+        case 24000:
+        case 25000:
+        case 30000:
+        case 50000:
+        case 60000:
+            _videostream.dwScale=1000;
+            _videostream.dwRate=fps;
+            break;
+        default:
+            _videostream.dwScale=1;
+            _videostream.dwRate=90000;
+            _mainaviheader.dwMicroSecPerFrame=ADM_UsecFromFps1000(fps);
+            break;
+    }
+    if(fieldEncoded)
+    {
+        printf("[psDemux] Doubling fps for field-encoded video");
+        if(_videostream.dwRate<=45000)
+            _videostream.dwRate*=2;
+        else if(!(_videostream.dwScale%2))
+            _videostream.dwScale/=2;
+        if(_mainaviheader.dwMicroSecPerFrame)
+            _mainaviheader.dwMicroSecPerFrame=ADM_UsecFromFps1000(fps*2);
+        else
+            printf(", new time base: %d / %d",_videostream.dwScale,_videostream.dwRate);
+        printf("\n");
+    }
+    }
     _videostream.dwLength= _mainaviheader.dwTotalFrames=ListOfFrames.size();
     printf("[psDemux] Found %d video frames\n",_videostream.dwLength);
     if(_videostream.dwLength)_isvideopresent=1;
 //***********
     
     psPacket=new psPacketLinear(0xE0);
-    if(psPacket->open(name,appendType)==false) 
+    if(psPacket->open(name,append)==false)
     {
         printf("psDemux] Cannot psPacket open the file\n");
         goto abt;
@@ -230,7 +266,7 @@ uint8_t psHeader::close(void)
 
  psHeader::psHeader( void ) : vidHeader()
 { 
-    interlaced=false;
+    fieldEncoded=false;
     lastFrame=0xffffffff;
     
 }
@@ -251,6 +287,7 @@ uint8_t psHeader::close(void)
 uint8_t  psHeader::getFrame(uint32_t frame,ADMCompressedImage *img)
 {
     if(frame>=ListOfFrames.size()) return 0;
+    getFlags(frame,&(img->flags));
     dmxFrame *pk=ListOfFrames[frame];
     if(frame==(lastFrame+1) && pk->type!=1) // the next frame, not an intra
     {
@@ -261,7 +298,6 @@ uint8_t  psHeader::getFrame(uint32_t frame,ADMCompressedImage *img)
              img->demuxerDts=pk->dts;
              img->demuxerPts=pk->pts;
              //printf("[>>>] %d:%02x %02x %02x %02x\n",frame,img->data[0],img->data[1],img->data[2],img->data[3]);
-             getFlags(frame,&(img->flags));
              return r;
     }
     if(pk->type==1) // an intra
@@ -272,7 +308,6 @@ uint8_t  psHeader::getFrame(uint32_t frame,ADMCompressedImage *img)
              img->demuxerFrameNo=frame;
              img->demuxerDts=pk->dts;
              img->demuxerPts=pk->pts;
-             getFlags(frame,&(img->flags));
              //printf("[>>>] %d:%02x %02x %02x %02x\n",frame,img->data[0],img->data[1],img->data[2],img->data[3]);
              lastFrame=frame;
              return r;
@@ -313,7 +348,6 @@ uint8_t  psHeader::getFrame(uint32_t frame,ADMCompressedImage *img)
     img->demuxerDts=pk->dts;
     img->demuxerPts=pk->pts;
     //printf("[>>>] %d:%02x %02x %02x %02x\n",frame,img->data[0],img->data[1],img->data[2],img->data[3]);
-    getFlags(frame,&(img->flags));
     return r;
 }
 

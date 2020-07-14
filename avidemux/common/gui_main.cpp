@@ -39,6 +39,8 @@
 #include "ADM_coreVideoEncoder.h"
 #include "ADM_videoEncoderApi.h"
 #include "ADM_muxerProto.h"
+
+#include "ADM_coreVideoFilterFunc.h"
 #include "ADM_audioFilter/include/ADM_audioFilterInterface.h"
 
 #include "avi_vars.h"
@@ -49,10 +51,10 @@
 #include "ADM_edAudioTrackExternal.h"
 #include "ADM_threads.h"
 #include "ADM_muxerProto.h"
-admMutex singleThread;
 
-float currentZoom=ZOOM_1_1;
+static admMutex singleThread("actionHandlerMutex");
 static int cutsNotOnIntraWarned;
+
 #include "DIA_audioTracks.h"
 //***********************************
 //******** A Function ***************
@@ -340,7 +342,6 @@ void HandleAction (Action action)
             A_saveSession();
             video_body->clearUndoQueue();
         }
-        autolock.unlock();
         return;
     case ACT_RESTORE_SESSION:
         if(playing) break;
@@ -433,13 +434,15 @@ void HandleAction (Action action)
         case ACT_ZOOM_1_1:
         case ACT_ZOOM_2_1:
         //case ACT_ZOOM_4_1:
-                currentZoom=(float)(2<<(action-ACT_ZOOM_1_4))/8;
+        {
+                float currentZoom=(float)(2<<(action-ACT_ZOOM_1_4))/8;
                 UI_setBlockZoomChangesFlag(true);
                 changePreviewZoom(currentZoom);
                 UI_setBlockZoomChangesFlag(false);
                 UI_resetZoomThreshold();
                 admPreview::samePicture();
                 break;
+        }
         case ACT_ZOOM_FIT_IN:
                 UI_setZoomToFitIntoWindow();
                 break;
@@ -563,21 +566,21 @@ void HandleAction (Action action)
               {
                   video_body->pasteFromClipBoard(currentPts);
               }
-              ADM_cutPointType chk=ADM_EDITOR_CUT_POINT_IDR;
+              ADM_cutPointType chk=ADM_EDITOR_CUT_POINT_KEY;
               if(!UI_getCurrentVCodec())
                   chk=video_body->checkCutsAreOnIntra();
-              if(cutsNotOnIntraWarned!=(int)chk && chk!=ADM_EDITOR_CUT_POINT_IDR)
+              if(cutsNotOnIntraWarned!=(int)chk && chk!=ADM_EDITOR_CUT_POINT_KEY)
               {
                   const char *alert;
                   bool ask=true;
                   switch(chk)
                   {
-                      case ADM_EDITOR_CUT_POINT_NON_IDR:
+                      case ADM_EDITOR_CUT_POINT_NON_KEY:
                           alert=QT_TRANSLATE_NOOP("adm","The cut points of the pasted video are not on keyframes.\n"
                               "Video saved in copy mode will be corrupted at these points.\n"
                               "Proceed anyway?");
                           break;
-                      case ADM_EDITOR_CUT_POINT_RECOVERY:
+                      case ADM_EDITOR_CUT_POINT_BAD_POC:
                           alert=QT_TRANSLATE_NOOP("adm","This video uses non-IDR recovery points instead of IDR as keyframes. "
                               "Picture reordering information in the video stream is not reset at non-IDR frames. "
                               "The cut points of the pasted selection may result in playback interruption "
@@ -721,16 +724,16 @@ void HandleAction (Action action)
                 GUI_Error_HIG(QT_TRANSLATE_NOOP("adm","Cutting"),QT_TRANSLATE_NOOP("adm","Error while cutting out."));
                 break;
             }
-            ADM_cutPointType chk=ADM_EDITOR_CUT_POINT_IDR;
+            ADM_cutPointType chk=ADM_EDITOR_CUT_POINT_KEY;
             if(!lastFrame && !UI_getCurrentVCodec())
                 chk=video_body->checkCutIsOnIntra(a);
-            if(cutsNotOnIntraWarned!=(int)chk && chk!=ADM_EDITOR_CUT_POINT_IDR)
+            if(cutsNotOnIntraWarned!=(int)chk && chk!=ADM_EDITOR_CUT_POINT_KEY)
             {
                 const char *alert;
                 bool ask=true;
                 switch(chk)
                 {
-                    case ADM_EDITOR_CUT_POINT_NON_IDR:
+                    case ADM_EDITOR_CUT_POINT_NON_KEY:
                         if(action==ACT_Cut)
                             alert=QT_TRANSLATE_NOOP("adm","The end point of the cut is not on a keyframe.\n"
                                 "Video saved in copy mode will be corrupted at this point.\n"
@@ -740,7 +743,7 @@ void HandleAction (Action action)
                                 "Video saved in copy mode will be corrupted at this point.\n"
                                 "Proceed anyway?");
                         break;
-                    case ADM_EDITOR_CUT_POINT_RECOVERY:
+                    case ADM_EDITOR_CUT_POINT_BAD_POC:
                         if(action==ACT_Cut)
                             alert=QT_TRANSLATE_NOOP("adm","This video uses non-IDR recovery points instead of IDR as keyframes. "
                                 "Picture reordering information in the video stream is not reset at non-IDR frames. "
@@ -1628,7 +1631,7 @@ void A_addJob(void)
         if(!name || !final) return;
         if(!*name || !*final) return;
 
-        base=ADM_getJobDir();
+        base=ADM_strdup(ADM_getJobDir().c_str());
         fullname=new char[strlen(name)+strlen(base)+2+4];
 
         strcpy(fullname,base);
@@ -1639,7 +1642,7 @@ void A_addJob(void)
         A_saveScript(getScriptEngines()[0], final);
 
         delete [] fullname;
-        delete [] base;
+        ADM_dealloc(base);
         ADM_dealloc(name);
         ADM_dealloc(final);
 }
@@ -1706,6 +1709,7 @@ uint8_t GUI_close(void)
       delete avifileinfo;
       //delete wavinfo;
       avifileinfo = NULL;
+      ADM_vf_clearFilters();
       video_body->clearUndoQueue();
       video_body->cleanup ();
       UI_setAudioTrackCount(0);

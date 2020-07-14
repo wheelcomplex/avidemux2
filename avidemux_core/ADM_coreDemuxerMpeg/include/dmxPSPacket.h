@@ -23,7 +23,7 @@ protected:
 public:
                         psPacket(void);
     virtual            ~psPacket();
-    virtual bool        open(const char *filenames,FP_TYPE append);
+    virtual bool        open(const char *filenames, int append);
     virtual bool        close(void);
     virtual bool        getPacket(uint32_t maxSize, uint8_t *pid, uint32_t *packetSize,uint64_t *pts,uint64_t *dts,uint8_t *buffer,uint64_t *startAt);
     virtual uint64_t    getPos(void);
@@ -142,6 +142,7 @@ protected:
         packetStats stats[256];
         uint64_t    lastVobuEnd;    // In 90 Khz tick
         uint64_t    nextVobuEnd;    // In 90 Khz tick
+        uint64_t    nextVobuStart;
         uint64_t    lastVobuPosition; 
         uint64_t    nextVobuPosition; 
         bool        decodeVobuPCI(uint32_t size,uint8_t *data);
@@ -149,13 +150,14 @@ protected:
 
 
 public:
-        uint64_t        getLastVobuEndTime(void) {return lastVobuEnd;}
+        uint64_t        getLastVobuEndTime(void) {return lastVobuEnd > nextVobuStart ? lastVobuEnd-nextVobuStart : 0;}
         uint64_t        getLastVobuPosition(void) {return lastVobuPosition;}
         uint64_t        getNextVobuPosition(void) {return nextVobuPosition;}
                         psPacketLinearTracker(uint8_t pid);
                         ~psPacketLinearTracker();
          packetStats    *getStat(int intdex);
          bool           resetStats(void);
+         bool           collectStats(uint8_t pid);
 virtual  bool           getPacketOfType(uint8_t pid,uint32_t maxSize, uint32_t *packetSize,uint64_t *pts,uint64_t *dts,uint8_t *buffer,uint64_t *startAt);
          int            findStartCode(void);
 };

@@ -69,14 +69,14 @@ static void *spawnerBoomerang(void *arg)
     return NULL;
 }
 
-bool spawnProcess(const char *processName, int argc, const string argv[])
+static bool spawnProcess(const char *processName, const vector <string> args)
 {
     ADM_info("Starting <%s>\n",processName);
     string command=string(processName);
-    for(int i=0;i<argc;i++)
+    for(int i=0;i<args.size();i++)
     {
-        ADM_info("%d : %s\n",i,argv[i].c_str());
-        command+=string(" ")+argv[i];
+        ADM_info("%d : %s\n",i,args.at(i).c_str());
+        command+=string(" ")+args.at(i);
     }
     ADM_info("=>%s\n",command.c_str());
     ADM_info("==================== Start of spawner process job ================\n");
@@ -128,20 +128,23 @@ bool spawnProcess(const char *processName, int argc, const string argv[])
 */
 bool jobWindow::runProcess(spawnData *data)
 {
-    // 3 args in our case...
-    string argv[5];
+    vector <string> args;
+    if(portable)
+        args.push_back(string("--portable"));
+    args.push_back(string("--nogui "));
     char str[100];
     sprintf(str,"--slave %d",localPort);
-    argv[0]=string("--nogui ");
-    argv[1]=string(str);
-    argv[2]=string("--run \"")+data->script+string("\" ");
-    argv[3]=string("--save \"")+data->outputFile+string("\" ");
+    args.push_back(string(str));
+    string s=string("--run \"")+data->script+string("\" ");
+    args.push_back(s);
+    s=string("--save \"")+data->outputFile+string("\" ");
+    args.push_back(s);
 #ifndef _WIN32
-    argv[4]=string("--quit > /tmp/prout.log");
+    args.push_back(string("--quit > /tmp/prout.log"));
 #else
-    argv[4]=string("--quit ");
+    args.push_back(string("--quit"));
 #endif
-    return spawnProcess(data->exeName,5,argv);
+    return spawnProcess(data->exeName,args);
 }
 /**
     \fn spawnChild
@@ -187,10 +190,7 @@ bool jobWindow::runOneJob( ADMJob &job)
     // 1- Start listening to socket
 
     // 2- Spawn  child
-    string ScriptFullPath;
-    
-    
-    ScriptFullPath=string(ADM_getJobDir())+slash+string(job.scriptName);
+    string ScriptFullPath=ADM_getJobDir()+slash+string(job.scriptName);
     const char *avidemuxVersion=MKCLI();
     if(ui.checkBoxUseQt4->isChecked())
     {

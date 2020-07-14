@@ -94,6 +94,8 @@ int A_Save(const char *name)
     uint64_t current=video_body->getCurrentFramePts();
     char *fullpath=ADM_PathCanonize(name);
     admSaver *save=new admSaver(fullpath);
+    delete [] fullpath;
+    fullpath=NULL;
     bool r=save->save();
     delete save;
     ADM_slaveSendResult(r);
@@ -188,6 +190,9 @@ bool abort=false;
         if(false==pass1->setup())
         {
             printf("[Save] setup failed for pass1 encoder\n");
+            GUI_Error_HIG(QT_TRANSLATE_NOOP("adm","Video"),QT_TRANSLATE_NOOP("adm","Cannot set up encoder for the first pass. "
+                "The configuration supplied to the encoder may be incompatible "
+                "or the encoder may depend on features unavailable on this system."));
             delete pass1;
             pass1=NULL;
             return NULL;
@@ -209,24 +214,29 @@ bool abort=false;
         bitstream.bufferSize=BUFFER_SIZE;
         int nbFrames=0;
         uint32_t percent=0;
+#define GUI_REFRESH_DELAY 500 // in ms
+        uint32_t nextUpdate=GUI_REFRESH_DELAY;
         while(pass1->encode(&bitstream))
         {
             if(bitstream.pts!=ADM_NO_PTS)
             {
-                float f=100;
-                f/=videoDuration;
-                f*=bitstream.pts;
-                uint32_t p=(uint32_t)f;
-                if(percent<p)
-                    percent=p; // avoid progress bar going backwards
+                UI_purge();
                 if(!muxer->getEncoding()->isAlive())
                 {
                     abort=true;
                     break;
                 }
-                muxer->getEncoding()->setPercent(percent);
+                float f=100;
+                f/=videoDuration;
+                f*=bitstream.pts;
+                uint32_t p=(uint32_t)f;
+                if(percent<p)
+                {
+                    percent=p; // avoid progress bar going backwards
+                    muxer->getEncoding()->setPercent(percent);
+                }
                 uint32_t elapsed=ticktock.getElapsedMS();
-                if(percent>=1)
+                if(percent>=1 && elapsed>nextUpdate)
                 {
                     double totalTime=(100*elapsed)/percent;
                     double remaining=totalTime-elapsed;
@@ -234,6 +244,8 @@ bool abort=false;
                         remaining=0;
                     uint32_t remainingMs=(uint32_t)remaining;
                     muxer->getEncoding()->setRemainingTimeMS(remainingMs);
+                    nextUpdate=elapsed+GUI_REFRESH_DELAY;
+#undef GUI_REFRESH_DELAY
                 }
             }
             nbFrames++;
@@ -376,18 +388,14 @@ ADM_videoStream *admSaver::setupVideo(void)
         }
         if(encoder->setup()==false)
         {
-            GUI_Error_HIG(QT_TRANSLATE_NOOP("adm","Video"),QT_TRANSLATE_NOOP("adm","Cannot setup codec. Bitrate too low?"));
+            GUI_Error_HIG(QT_TRANSLATE_NOOP("adm","Video"),QT_TRANSLATE_NOOP("adm","Cannot set up encoder. "
+                "The configuration supplied to the encoder may be incompatible "
+                "or the encoder may depend on features unavailable on this system."));
             delete encoder;
             encoder=NULL;
             return NULL;
         }
         video= new ADM_videoStreamProcess(encoder);
-        if(!video)
-        {
-                GUI_Error_HIG(QT_TRANSLATE_NOOP("adm","Video"),QT_TRANSLATE_NOOP("adm","Cannot create encoder"));
-                delete encoder;
-                return NULL;
-        }
     }  
     return video;
 }
@@ -448,12 +456,12 @@ bool admSaver::save(void)
         bool ask=true;
         switch(chk)
         {
-            case ADM_EDITOR_CUT_POINT_NON_IDR:
+            case ADM_EDITOR_CUT_POINT_NON_KEY:
                 alert=QT_TRANSLATE_NOOP("adm","The video is in copy mode but the cut points are not on keyframes.\n"
                     "The video will be saved but there will be corruption at cut point(s).\n"
                     "Do you want to continue anyway ?");
                 break;
-            case ADM_EDITOR_CUT_POINT_RECOVERY:
+            case ADM_EDITOR_CUT_POINT_BAD_POC:
                 alert=QT_TRANSLATE_NOOP("adm","This video uses non-IDR recovery points instead of IDR as keyframes. "
                     "Picture reordering information in the video stream is not reset at non-IDR frames. "
                     "The choice of cut points may result in playback interruption "

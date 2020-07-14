@@ -118,10 +118,11 @@ bool ADM_ffMpeg2Encoder::configureContext(void)
                 break;
     }
     _context->rc_buffer_size=Mp2Settings.lavcSettings.bufferSize*8*1024;
-    _context->rc_buffer_size_header=Mp2Settings.lavcSettings.bufferSize*8*1024;
+    //_context->rc_buffer_size_header=Mp2Settings.lavcSettings.bufferSize*8*1024; // needs patched avcodec.h
     _context->rc_initial_buffer_occupancy=_context->rc_buffer_size;
     _context->rc_max_rate=Mp2Settings.lavcSettings.maxBitrate*1000;
-    _context->rc_max_rate_header=Mp2Settings.lavcSettings.maxBitrate*1000;
+    _context->bit_rate_tolerance=Mp2Settings.lavcSettings.vratetol*1000;
+    //_context->rc_max_rate_header=Mp2Settings.lavcSettings.maxBitrate*1000; // needs patched avcodec.h
     // /Override some parameters specific to this codec
     
     return true;
@@ -311,6 +312,8 @@ diaMenuEntry foE[]={
 
         diaElemMenu     interlaced(&(iinterlaced),QT_TRANSLATE_NOOP("ffmpeg2","_Interlaced:"),2,interE);
         diaElemMenu     fieldOrder(&(bff),QT_TRANSLATE_NOOP("ffmpeg2","Field Order:"),2,foE);
+
+        interlaced.link(interE+1,1,&fieldOrder);
 
           /* First Tab : encoding mode */
         diaElem *diamode[]={&arM,&threadM,&bitrate};

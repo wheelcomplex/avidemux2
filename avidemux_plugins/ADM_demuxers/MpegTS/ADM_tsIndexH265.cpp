@@ -169,13 +169,18 @@ bool TsIndexerH265::findH265VPS(tsPacketLinearTracker *pkt,TSVideo &video)
     pkt->getInfo( &packetInfo);
     thisUnit.consumedSoFar=0; // Head
     
-    uint64_t startExtraData=packetInfo.startAt-193; // /!\ It may be in the previous packet, very unlikely though    
+    //uint64_t startExtraData=packetInfo.startAt-193; // /!\ It may be in the previous packet, very unlikely though
     pkt->read(512,headerBuffer+5);
     uint8_t *pointer=headerBuffer+5;
     uint8_t *end=headerBuffer+512;
     // Rewind
-    pkt->setPos(packetInfo.startAt);
-    
+    if(packetInfo.offset>12) // 2 x 5 bytes long start code + 2 bytes AUD
+        packetInfo.offset-=12;
+    else
+        packetInfo.offset=0;
+    pkt->seek(packetInfo.startAt,packetInfo.offset);
+    pkt->collectStats();
+
     pointer=findGivenStartCodeInBuffer(pointer,end,NAL_H265_SPS,"SPS");
     if(!pointer)
     {
@@ -309,31 +314,38 @@ uint8_t TsIndexerH265::run(const char *file,ADM_TS_TRACK *videoTrac)
     }
 
     uint8_t result=0;
-    bool bAppend=false;
     bool seq_found=false;
     bool firstSps=true;
     uint64_t lastAudOffset=0;
     int audCount=0;
+    int lastRefIdc=0;
     dmxPacketInfo packetInfo;
+
+    int append=0;
+#ifdef ASK_APPEND_SEQUENCED
+    append=1;
+    {
+    int nbFollowUps=ADM_probeSequencedFile(file,&append);
+    if(nbFollowUps<0)
+    {
+        qfclose(index);
+        index=NULL;
+        return 0;
+    }
+    if(!nbFollowUps || false==GUI_Question(QT_TRANSLATE_NOOP("tsdemuxer","There are several files with sequential file names. Should they be all loaded ?")))
+        append=0;
+    }
+#endif
+    writeSystem(file,append);
 
     pkt=new tsPacketLinearTracker(videoTrac->trackPid, audioTracks);
 
-    FP_TYPE append=FP_DONT_APPEND;
-#ifdef ASK_APPEND_SEQUENCED
-    if(true==ADM_probeSequencedFile(file))
-    {
-        if(true==GUI_Question(QT_TRANSLATE_NOOP("tsdemuxer","There are several files with sequential file names. Should they be all loaded ?")))
-                bAppend=true;
-    }
-    if(bAppend==true)
-        append=FP_APPEND;
-#endif
-    writeSystem(file,bAppend);
-    pkt->open(file,append);
+    if(!pkt->open(file,append))
+        goto the_end;
     data.pkt=pkt;
     fullSize=pkt->getSize();
-    gui=createProcessing(QT_TRANSLATE_NOOP("tsdemuxer","Indexing"),pkt->getSize());
-    int lastRefIdc=0;
+    gui=createProcessing(QT_TRANSLATE_NOOP("tsdemuxer","Indexing"),fullSize);
+
     //******************
     // 1 search SPS
     //******************

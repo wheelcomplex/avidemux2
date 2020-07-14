@@ -33,25 +33,27 @@
     \fn ADM_tsAccess
     \param name   [in] Name of the file to take audio from
     \param pid    [in] Pid of the audio track
-    \param append [in] Flag to auto append files (ignored for now)
+    \param append [in] Flag to auto append files
     \param aacAdts[in] Set to true if the file is aac/adts
     \param myLen/myExtra[in] ExtraData if any
 */
-ADM_tsAccess::ADM_tsAccess(const char *name,uint32_t pid,bool append,ADM_TS_MUX_TYPE muxing,int myLen,uint8_t  *myExtra)
+ADM_tsAccess::ADM_tsAccess(const char *name,uint32_t pid,int append,ADM_TS_MUX_TYPE muxing,int myLen,uint8_t  *myExtra)
 {
-FP_TYPE fp=FP_DONT_APPEND;
-        if(append) fp=FP_APPEND;
         this->pid=pid;
-        if(!demuxer.open(name,fp)) ADM_assert(0);
+        if(!demuxer.open(name,append)) ADM_assert(0);
         packet=new TS_PESpacket(pid);
         this->muxing=muxing;
         ADM_info("Creating audio track, pid=%x, muxing =%d\n",pid,muxing);
+        lastDts=ADM_NO_PTS;
+        wrapCount=0;
         if(myLen && myExtra)
-        {   
-            extraData=new uint8_t [myLen+16]; // guards again lavcodec overread
+        {
             extraDataLen=myLen;
+            myLen+=64; // AV_INPUT_BUFFER_PADDING_SIZE, guards against lavcodec overread
+            extraData=new uint8_t [myLen];
+            memset(extraData,0,myLen);
             memcpy(extraData,myExtra,extraDataLen);
-            ADM_info("Creating ts audio access with %d bytes of extradata.",myLen);
+            ADM_info("Creating ts audio access with %u bytes of extradata.",extraDataLen);
             mixDump(extraData,extraDataLen);
         }
 }
@@ -124,6 +126,8 @@ bool      ADM_tsAccess::goToTime(uint64_t timeUs)
     {
             aprintf("[PsAudio] Requested %" PRIu32" tick before 1st seek point at :%" PRIu32"\n",(uint32_t)timeUs/1000,(uint32_t)seekPoints[0].dts/1000);
             demuxer.setPos(seekPoints[0].position);
+            wrapCount=0;
+            lastDts=ADM_NO_PTS;
             return true;
     }
 
@@ -135,6 +139,15 @@ bool      ADM_tsAccess::goToTime(uint64_t timeUs)
                     (uint32_t)seekPoints[i-1].dts/1000,
                     (uint32_t)seekPoints[i].dts/1000);
             demuxer.setPos(seekPoints[i-1].position);
+            uint64_t st=seekPoints[i-1].dts;
+            if(st!=ADM_NO_PTS)
+            {
+                st /= 100;
+                st *= 9; // now in ticks
+                st >>= 32;
+                wrapCount=(uint32_t)st;
+            }
+            lastDts=ADM_NO_PTS;
             return true;
         }
     }
@@ -147,14 +160,23 @@ bool      ADM_tsAccess::goToTime(uint64_t timeUs)
 uint64_t ADM_tsAccess::timeConvert(uint64_t x)
 {
     if(x==ADM_NO_PTS) return ADM_NO_PTS;
+    const uint64_t wrapLen=1LL<<32;
     if(x<dtsOffset)
+        x+=wrapLen;
+    x-=dtsOffset;
+    if(lastDts!=ADM_NO_PTS)
     {
-        x+=1LL<<32;
+        if(lastDts>x && lastDts-x >= wrapLen/2)
+            wrapCount++;
+        if(wrapCount && x>lastDts && x-lastDts > wrapLen/2)
+            wrapCount--;
     }
-    x=x-dtsOffset;
-    x=x*1000;
-    x/=90;
-    return x;
+    lastDts=x;
+    x+=wrapLen*wrapCount;
+    double f=x*100.;
+    f/=9.;
+    f+=0.49;
+    return (uint64_t)f;
 
 }
 /**
@@ -162,13 +184,11 @@ uint64_t ADM_tsAccess::timeConvert(uint64_t x)
 */
 bool      ADM_tsAccess::getPacket(uint8_t *buffer, uint32_t *size, uint32_t maxSize,uint64_t *dts)
 {
-uint64_t p,d,start;
     // If it is adts, ask ffmpeg to unwrap it...
     switch(muxing)
     {
         case ADM_TS_MUX_ADTS:
             {
-                    bool r=false;
                     int outsize=0;
                     *size=0;
                     bool gotPacket=false;
@@ -208,7 +228,7 @@ uint64_t p,d,start;
         case ADM_TS_MUX_LATM:
             {
                 // Try to get one...
-                int retries=10;
+                int retries=20;
                 bool gotPacket=false;
                 uint64_t time=ADM_NO_PTS;
                 while(latm.empty()) // fetch next LOAS frame, it will contain several frames

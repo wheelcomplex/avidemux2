@@ -373,9 +373,8 @@ static enum AVPixelFormat ADM_LIBVA_getFormat(struct AVCodecContext *avctx,  con
 decoderFFLIBVA::decoderFFLIBVA(AVCodecContext *avctx,decoderFF *parent)
 : ADM_acceleratedDecoderFF(avctx,parent)
 {
-    
-    
     alive=false;
+    hwctx=NULL;
     _context->slice_flags     = SLICE_FLAG_CODED_ORDER|SLICE_FLAG_ALLOW_FIELD;
     
     for(int i=0;i<ADM_DEFAULT_SURFACE;i++)
@@ -400,6 +399,7 @@ decoderFFLIBVA::decoderFFLIBVA(AVCodecContext *avctx,decoderFF *parent)
     // create decoder
     vaapi_context *va_context=new vaapi_context;
     memset(va_context,0,sizeof(*va_context)); // dangerous...
+    hwctx=(void *)va_context;
     
     VAProfile profile; 
     switch(avctx->codec_id)
@@ -432,8 +432,6 @@ decoderFFLIBVA::decoderFFLIBVA(AVCodecContext *avctx,decoderFF *parent)
     if(va_context->context_id==VA_INVALID)
     {
         ADM_warning("Cannot create decoder\n");
-        delete va_context;
-        va_context=NULL;
         alive=false;
         return;
     }
@@ -470,6 +468,10 @@ decoderFFLIBVA::~decoderFFLIBVA()
         delete vaPool.freeSurfaceQueue[i];
     }
     vaPool.freeSurfaceQueue.clear();
+    vaapi_context *v=(vaapi_context *)hwctx;
+    if(v)
+        delete v;
+    hwctx=NULL;
     imageMutex.unlock();
 }
 /**
@@ -490,7 +492,7 @@ bool decoderFFLIBVA::uncompress (ADMCompressedImage * in, ADMImage * out)
             out->refType=ADM_HW_NONE;
     }
 
-    if (!in->dataLength )	// Null frame, silently skipped
+    if(!_parent->getDrainingState() && !in->dataLength) // Null frame, silently skipped
     {
         out->_noPicture = 1;
         out->Pts=ADM_COMPRESSED_NO_PTS;
@@ -502,18 +504,10 @@ bool decoderFFLIBVA::uncompress (ADMCompressedImage * in, ADMImage * out)
    // Put a safe value....
     out->Pts=in->demuxerPts;
     _context->reordered_opaque=in->demuxerPts;
-    int got_picture;
-    AVPacket pkt;
-    av_init_packet(&pkt);
-    pkt.data=in->data;
-    pkt.size=in->dataLength;
-    if(in->flags&AVI_KEY_FRAME)
-        pkt.flags=AV_PKT_FLAG_KEY;
-    else
-        pkt.flags=0;
-    
+
     AVFrame *frame=_parent->getFramePointer();
     ADM_assert(frame);
+
     if(_parent->getDrainingState())
     {
         if(_parent->getDrainingInitiated()==false)
@@ -521,9 +515,21 @@ bool decoderFFLIBVA::uncompress (ADMCompressedImage * in, ADMImage * out)
             avcodec_send_packet(_context, NULL);
             _parent->setDrainingInitiated(true);
         }
+    }else if(!handover)
+    {
+        AVPacket pkt;
+        av_init_packet(&pkt);
+        pkt.data=in->data;
+        pkt.size=in->dataLength;
+        if(in->flags&AVI_KEY_FRAME)
+            pkt.flags=AV_PKT_FLAG_KEY;
+        else
+            pkt.flags=0;
+
+        avcodec_send_packet(_context, &pkt);
     }else
     {
-        avcodec_send_packet(_context, &pkt);
+        handover=false;
     }
 
     int ret = avcodec_receive_frame(_context, frame);

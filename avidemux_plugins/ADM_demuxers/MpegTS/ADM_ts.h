@@ -41,6 +41,8 @@ protected:
                 tsPacket        demuxer;
                 uint32_t         pid;
                 uint64_t        dtsOffset;
+                uint64_t        lastDts; // in ticks, rescaled by dts offset
+                uint32_t        wrapCount; // dts wraps around after 1<<32 ticks
                 uint32_t        videoCodec;
                 ADM_TS_MUX_TYPE muxing;
                 ADM_adts2aac    adts;
@@ -50,7 +52,7 @@ public:
 public:
                 bool            setTimeOffset(uint64_t of) {dtsOffset=of;return true;}
                 
-                                  ADM_tsAccess(const char *name,uint32_t pid,bool append,ADM_TS_MUX_TYPE muxing,int extraLen,uint8_t *extraData); 
+                                  ADM_tsAccess(const char *name,uint32_t pid,int append,ADM_TS_MUX_TYPE muxing,int extraLen,uint8_t *extraData);
                 virtual           ~ADM_tsAccess();
                                     /// Hint, the stream is pure CBR (AC3,MP2,MP3)
                 virtual bool      isCBR(void) { return true;}
@@ -110,7 +112,7 @@ class tsHeader         :public vidHeader
 {
   protected:
     
-    bool    interlaced;
+    bool    fieldEncoded;
     bool    readVideo(indexFile *index);
     bool    readAudio(indexFile *index,const char *name);
     bool    readIndex(indexFile *index);

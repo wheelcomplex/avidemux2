@@ -133,6 +133,7 @@ void HandleAction_Save(Action action)
                     {
                         A_queueJob(oText,oFile.c_str());
                     }
+                    ADM_dealloc(oText);
                     ADMJob::jobShutDown();
                 }
             }
@@ -163,8 +164,11 @@ void HandleAction_Save(Action action)
     break;
 
     case ACT_SAVE_BUNCH_OF_JPG:
-      GUI_FileSelWrite (QT_TRANSLATE_NOOP("adm","Select JPEG Sequence to Save"), (SELFILE_CB *)A_saveBunchJpg);
-    	break;
+    {
+      const char *defaultExtension="jpg";
+      GUI_FileSelWriteExtension (QT_TRANSLATE_NOOP("adm","Select JPEG Sequence to Save"),defaultExtension,(SELFILE_CB *)A_saveBunchJpg);
+    }
+      break;
     case ACT_SAVE_BMP:
     {
       const char *defaultExtension="bmp";
@@ -682,7 +686,7 @@ void A_queueJob(const char *jobName,const char *outputFile)
             job.jobName=string(jobName);
 //#warning make sure it is unique
             job.scriptName=string(jobName)+string(".")+engine->defaultFileExtension();
-            string completePath=string(ADM_getJobDir());
+            string completePath=ADM_getJobDir();
             completePath+=job.scriptName;
             bool collision=false;
             if(ADM_fileExist(completePath.c_str()))

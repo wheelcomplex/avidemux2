@@ -39,11 +39,9 @@ extern "C"
 
 extern "C"
 {
-extern  HEVCSPS *ff_hevc_parser_get_sps(AVCodecParserContext *parser);
-extern  HEVCPPS *ff_hevc_parser_get_pps(AVCodecParserContext *parser);
-extern  HEVCVPS *ff_hevc_parser_get_vps(AVCodecParserContext *parser);
-   
-
+extern const HEVCSPS *ff_hevc_parser_get_sps(AVCodecParserContext *parser);
+extern const HEVCPPS *ff_hevc_parser_get_pps(AVCodecParserContext *parser);
+extern const HEVCVPS *ff_hevc_parser_get_vps(AVCodecParserContext *parser);
 }
 
 #include "../include/ADM_h265_tag.h"
@@ -127,6 +125,86 @@ bool H265Parser::init()
     parser->flags|=PARSER_FLAG_COMPLETE_FRAMES;
     return true;
 }
+
+/**
+ *  \fn bitsNeeded
+ */
+static int bitsNeeded(int v)
+{
+    int b=1;
+    while(v)
+    {
+        v>>=1;
+        b++;
+    }
+    return b;
+}
+
+/**
+ *  \fn spsInfoFromParserContext
+ */
+static bool spsInfoFromParserContext(AVCodecParserContext *parser, ADM_SPSinfoH265 *spsinfo)
+{
+    // Ok, let's see if we get a valid sps
+    const HEVCSPS *sps = ff_hevc_parser_get_sps(parser);
+    const HEVCVPS *vps = ff_hevc_parser_get_vps(parser);
+    const HEVCPPS *pps = ff_hevc_parser_get_pps(parser);
+    spsinfo-> num_extra_slice_header_bits=0;
+    spsinfo->output_flag_present_flag=false;
+    if(sps)
+    {
+        const HEVCWindow *ow=&sps->output_window;
+        printf("Coded dimensions = %d x %d\n",sps->width-ow->left_offset-ow->right_offset,sps->height-ow->top_offset-ow->bottom_offset);
+        spsinfo->width=sps->width-ow->left_offset-ow->right_offset;
+        spsinfo->height=sps->height-ow->top_offset-ow->bottom_offset;
+        spsinfo->fps1000=23976;
+        spsinfo->log2_max_poc_lsb=sps->log2_max_poc_lsb;
+        spsinfo->separate_colour_plane_flag=sps->separate_colour_plane_flag;
+        spsinfo->dependent_slice_segments_enabled_flag=0;
+        spsinfo->address_coding_length=bitsNeeded(sps->ctb_width*sps->ctb_height);
+        printf("VPS = %d  x %d ** %d\n",sps->ctb_width,sps->ctb_height, sps->ctb_size);
+        uint32_t timeBaseNum=0;
+        uint32_t timeBaseDen=0;
+        if(vps && vps->vps_timing_info_present_flag)
+        {
+            printf("VPS timescale = %u\n",vps->vps_time_scale);
+            printf("VPS num unit in tick = %u\n",vps->vps_num_units_in_tick);
+            timeBaseNum=vps->vps_num_units_in_tick;
+            timeBaseDen=vps->vps_time_scale;
+        }else if(sps->vui.vui_timing_info_present_flag)
+        {
+            printf("VUI timescale = %u\n",sps->vui.vui_time_scale);
+            printf("VUI num unit in tick = %u\n",sps->vui.vui_num_units_in_tick);
+            timeBaseNum=sps->vui.vui_num_units_in_tick;
+            timeBaseDen=sps->vui.vui_time_scale;
+        }
+        if(!timeBaseNum || !timeBaseDen)
+        {
+            ADM_warning("No framerate information, hardcoding to 50 fps\n");
+            spsinfo->fps1000=50*1000;
+        }else
+        {
+            double f=1000.;
+            f*=timeBaseDen;
+            f/=timeBaseNum;
+            f+=0.49;
+            spsinfo->fps1000=(int)f;
+        }
+        if(pps)
+        {
+            spsinfo-> num_extra_slice_header_bits=pps-> num_extra_slice_header_bits;
+            spsinfo->dependent_slice_segments_enabled_flag=pps->dependent_slice_segments_enabled_flag;
+            spsinfo->output_flag_present_flag=pps->output_flag_present_flag;
+        }
+        if(sps->vui.frame_field_info_present_flag)
+            spsinfo->field_info_present=true;
+        else
+            printf("No field info present\n");
+        return true;
+    }
+    return false;
+}
+
 /**
  * 
  * @return 
@@ -138,25 +216,9 @@ bool H265Parser::parseMpeg4(ADM_SPSinfoH265 *spsinfo)
 
     ctx->extradata=myData;
     ctx->extradata_size=myLen;
-    int used=av_parser_parse2(parser, ctx, &outptr, &outsize, NULL, 0, 0, 0,0);
-    printf("Used bytes %d, total = %d, outsize=%d (+5)\n",used,myLen,outsize);
-    if(!used)
-    {
-        ADM_warning("Failed to extract SPS info\n");
-        return false;
-    }
-    return  true;
-}
-
-static int bitsNeeded(int v)
-{
-    int b=1;
-    while(v)
-    {
-        v>>=1;
-        b++;
-    }
-    return b;
+    // no use to evaluate the return value, it will be always 0
+    av_parser_parse2(parser, ctx, &outptr, &outsize, NULL, 0, 0, 0,0);
+    return spsInfoFromParserContext(parser,spsinfo);
 }
 
 /**
@@ -182,7 +244,7 @@ bool H265Parser::parseAnnexB(ADM_SPSinfoH265 *spsinfo)
     *p++=0X22;  
 #endif
     ctx->flags |= PARSER_FLAG_COMPLETE_FRAMES;
-    mixDump(myData,myLen);
+    //mixDump(myData,myLen);
     while(toConsume>5)
      {
          ADM_info("Left in buffer %d\n",toConsume);
@@ -200,42 +262,7 @@ bool H265Parser::parseAnnexB(ADM_SPSinfoH265 *spsinfo)
          }
          break;
     }
-    // Ok, let's see if we get a valid sps
-   HEVCSPS *sps = ff_hevc_parser_get_sps(parser);
-   HEVCVPS *vps = ff_hevc_parser_get_vps(parser);
-   HEVCPPS *pps = ff_hevc_parser_get_pps(parser);
-   spsinfo-> num_extra_slice_header_bits=0;
-   if(sps)
-   {
-        HEVCWindow *ow=&sps->output_window;
-        printf("Coded dimensions = %d x %d\n",sps->width-ow->left_offset-ow->right_offset,sps->height-ow->top_offset-ow->bottom_offset);
-        spsinfo->width=sps->width-ow->left_offset-ow->right_offset;
-        spsinfo->height=sps->height-ow->top_offset-ow->bottom_offset;
-        spsinfo->fps1000=23976;
-        spsinfo->dependent_slice_segments_enabled_flag=0;
-        spsinfo->address_coding_length=bitsNeeded(sps->ctb_width*sps->ctb_height);
-        printf("VPS = %d  x %d ** %d\n",sps->ctb_width,sps->ctb_height, sps->ctb_size);
-        if(vps)
-        {
-            printf("VPS timescale =%d\n",(int)vps->vps_time_scale);
-            printf("VPS num unit in tick =%d\n",(int)vps->vps_num_units_in_tick);
-            if(vps->vps_time_scale && vps->vps_num_units_in_tick)
-                spsinfo->fps1000=(1000*vps->vps_time_scale)/vps->vps_num_units_in_tick;
-            else
-            {
-                ADM_warning("No framerate information, hardcoding to 50 fps\n");
-                spsinfo->fps1000=50*1000;
-            }
-        }
-        if(pps)
-        {
-            spsinfo-> num_extra_slice_header_bits=pps-> num_extra_slice_header_bits;
-            spsinfo->dependent_slice_segments_enabled_flag=pps->dependent_slice_segments_enabled_flag;
-            
-        }
-        return true;
-   }
-    return false;
+    return spsInfoFromParserContext(parser,spsinfo);
 }
 
 /**
@@ -334,5 +361,323 @@ int ADM_convertFromAnnexBToMP4H265(uint8_t *inData, uint32_t inSize, uint8_t *ou
         ADM_assert(outputSize<outMaxSize);
     }
     return outputSize;
+}
+
+/**
+    \fn nalTypeToString
+*/
+static const char *nalTypeToString(int type)
+{
+    int nb=sizeof(nalDesc)/sizeof(NAL_DESC);
+    for(int i=0; i<nb; i++)
+    {
+        if(nalDesc[i].value == type)
+            return nalDesc[i].name;
+    }
+    return "Unknown";
+}
+
+/**
+    \fn decodeSliceHeaderH265
+*/
+static bool decodeSliceHeaderH265(uint8_t *head, uint8_t *tail, uint32_t *flags, ADM_SPSinfoH265 *info, int *poc)
+{
+    if(head+2>=tail)
+        return false;
+    uint8_t nal=(*head>>1) & 0x3F;
+    head+=2; // skip NALU type, layer ID and temporal ID
+    switch(nal)
+    {
+        case NAL_H265_TRAIL_N:
+        case NAL_H265_TRAIL_R:
+        case NAL_H265_TSA_N:
+        case NAL_H265_TSA_R:
+        case NAL_H265_STSA_N:
+        case NAL_H265_STSA_R:
+        case NAL_H265_BLA_W_LP:
+        case NAL_H265_BLA_W_RADL:
+        case NAL_H265_BLA_N_LP:
+        case NAL_H265_IDR_W_RADL:
+        case NAL_H265_IDR_N_LP:
+        case NAL_H265_CRA_NUT:
+        case NAL_H265_RADL_N:
+        case NAL_H265_RADL_R:
+        case NAL_H265_RASL_N:
+        case NAL_H265_RASL_R:
+            break;
+        default:
+            ADM_warning("Unsupported NAL type %d (%s)\n",nal,nalTypeToString(nal));
+            return false;
+    }
+    uint8_t *out=(uint8_t *)malloc(tail-head+AV_INPUT_BUFFER_PADDING_SIZE);
+    if(!out) return false;
+    memset(out,0,tail-head+AV_INPUT_BUFFER_PADDING_SIZE);
+    int size=ADM_unescapeH264(tail-head,head,out);
+    getBits bits(size,out);
+    int firstSliceInPic=bits.get(1);
+    bool keyframe = (nal >= NAL_H265_BLA_W_LP) && (nal <= NAL_H265_IRAP_VCL23);
+    if(keyframe)
+        bits.get(1); // no_output_of_prior_pics_flag
+    bits.getUEG(); // PPS id
+    if(!firstSliceInPic)
+    {
+        if(info->dependent_slice_segments_enabled_flag && bits.get(1))
+        {
+            ADM_warning("Dependent slice segments not handled.\n");
+            free(out);
+            return false;
+        }
+        bits.get(info->address_coding_length); // slice segment address
+    }
+    for(int i=0; i < info->num_extra_slice_header_bits; i++)
+        bits.skip(1);
+    int sliceType=bits.getUEG();
+    switch(sliceType)
+    {
+        case 0:
+            *flags=AVI_B_FRAME;
+            break;
+        case 1:
+            *flags=AVI_P_FRAME;
+            break;
+        case 2:
+            *flags=AVI_KEY_FRAME; // intra
+            break;
+        default:
+            ADM_warning("Unknown slice type %d\n",sliceType);
+            free(out);
+            return false;
+    }
+    if(*flags!=AVI_KEY_FRAME && keyframe)
+    {
+        ADM_warning("Slice type mismatch, NAL says keyframe, header says %s\n",(*flags==AVI_B_FRAME)? "B" : "P");
+    }
+    if(info->output_flag_present_flag)
+        bits.get(1); // pic_output_flag
+    if(info->separate_colour_plane_flag)
+        bits.get(2); // colour_plane_id
+    if((nal == NAL_H265_IDR_W_RADL) || (nal == NAL_H265_IDR_N_LP))
+    {
+        if(*flags!=AVI_KEY_FRAME)
+        {
+            ADM_warning("Slice type mismatch, NAL says IDR, header says %s\n",(*flags==AVI_B_FRAME)? "B" : "P");
+            free(out);
+            return false;
+        }else
+        {
+            *flags |= AVI_IDR_FRAME;
+        }
+        *poc=0;
+        free(out);
+        return true;
+    }
+    int pocLsb = bits.get(info->log2_max_poc_lsb);
+    const int maxPocLsb = 1 << info->log2_max_poc_lsb;
+
+    int lastPoc = 0;
+    if(*poc > INT_MIN) lastPoc = *poc;
+    int lastPocLsb = lastPoc % maxPocLsb;
+    int lastPocMsb = lastPoc - lastPocLsb;
+    int pocMsb = lastPocMsb;
+
+    if(pocLsb < lastPocLsb && lastPocLsb-pocLsb >= maxPocLsb/2)
+        pocMsb = lastPocMsb + maxPocLsb;
+    else if(pocLsb > lastPocLsb && pocLsb-lastPocLsb > maxPocLsb/2)
+        pocMsb = lastPocMsb - maxPocLsb;
+
+    if(nal == NAL_H265_BLA_W_LP || nal == NAL_H265_BLA_W_RADL || nal == NAL_H265_BLA_N_LP)
+        pocMsb = 0;
+    *poc = pocMsb + pocLsb;
+    free(out);
+    return true;
+}
+
+/**
+ *  \fn extractH265FrameType
+ *  \brief Parse access unit using given NALU length size nalSize (0: autodetect), find a slice and decode the header.
+ *         The caller must set *poc to previous POC if applicable, else to INT_MIN
+ */
+bool extractH265FrameType(uint8_t *buffer, uint32_t len, uint32_t nalSize, ADM_SPSinfoH265 *spsinfo, uint32_t *flags, int *poc)
+{
+    if(!spsinfo || !flags || !poc)
+        return false;
+
+    uint8_t *head = buffer;
+    uint8_t *tail = buffer + len;
+    uint8_t nalType;
+
+    uint32_t i, length = 0;
+    if(!nalSize || nalSize > 4)
+    { // Try to detect number of bytes used to code NAL length. Shaky.
+        nalSize = 4;
+        for(i = 0; i < nalSize; i++)
+        {
+            length = (length << 8) + head[i];
+            if(i && length > len)
+            {
+                nalSize = i;
+                break;
+            }
+        }
+    }
+    *flags = 0;
+
+    while(head + nalSize < tail)
+    {
+        length = 0;
+        for(int i=0; i < nalSize; i++)
+            length = (length << 8) + head[i];
+        if(!length)
+        {
+            ADM_warning("Zero length NAL unit?\n");
+            return false;
+        }
+        if(length > len)
+        {
+            ADM_warning("Incomplete NAL unit: need %u, got %u\n",length,len);
+            return false;
+        }
+        head += nalSize;
+        len = (len > nalSize)? len - nalSize : 0;
+        if(*(head) & 0x80)
+        {
+            ADM_warning("Invalid NAL header, skipping.\n");
+            head += length;
+            len = (len > length)? len - length : 0;
+            continue;
+        }
+        nalType = (*(head)>>1) & 0x3F;
+        switch(nalType)
+        {
+            case NAL_H265_TRAIL_N:
+            case NAL_H265_TRAIL_R:
+            case NAL_H265_TSA_N:
+            case NAL_H265_TSA_R:
+            case NAL_H265_STSA_N:
+            case NAL_H265_STSA_R:
+            case NAL_H265_BLA_W_LP:
+            case NAL_H265_BLA_W_RADL:
+            case NAL_H265_BLA_N_LP:
+            case NAL_H265_IDR_W_RADL:
+            case NAL_H265_IDR_N_LP:
+            case NAL_H265_CRA_NUT:
+            case NAL_H265_RADL_N:
+            case NAL_H265_RADL_R:
+            case NAL_H265_RASL_N:
+            case NAL_H265_RASL_R:
+            {
+#define SLICE_HEADER_SAMPLE_SIZE 32
+                if(length > SLICE_HEADER_SAMPLE_SIZE)
+                    length = SLICE_HEADER_SAMPLE_SIZE;
+                return decodeSliceHeaderH265(head, head+length, flags, spsinfo, poc);
+            }
+            default:
+                ADM_info("Skipping NALU of type %d (%s)\n",nalType,nalTypeToString(nalType));
+                break;
+        }
+        head+=length;
+        len = (len > length)? len - length : 0;
+    }
+    ADM_warning("No picture slice found in the buffer.\n");
+    return false;
+}
+
+/**
+ *  \fn extractH265FrameType_startCode
+ *  \brief Parse access unit in AnnexB type stream, find a slice and decode the header
+ *         The caller must set *poc to previous POC if applicable, else to a negative value
+ */
+bool extractH265FrameType_startCode(uint8_t *buffer, uint32_t len, ADM_SPSinfoH265 *spsinfo, uint32_t *flags, int *poc)
+{
+    if(!spsinfo || !flags || !poc)
+        return false;
+
+    uint8_t *head = buffer, *tail = buffer + len;
+    uint32_t hnt = 0xFFFFFFFF;
+    int nalType = -1, counter = 0, length = 0;
+    bool last = false;
+
+    *flags = 0;
+
+    while(head + 2 < tail)
+    {
+        // Search startcode
+        hnt = (hnt << 8) + head[0];
+        if((hnt & 0xFFFFFF) != 1)
+        {
+            head++;
+            if(head + 2 < tail)
+                continue;
+            if(!counter) break;
+            last = true;
+            length = head - buffer + 2;
+        }
+        int prevNaluType = -1;
+        if(!last)
+        {
+            head++;
+            counter++;
+            if(counter > 1)
+                length = head - buffer - 3; // 3 bytes start code length no matter zero-prefixed or not
+            prevNaluType = (*head>>1) & 0x3F;
+            if(!length)
+            {
+                buffer = head;
+                nalType = prevNaluType;
+                continue;
+            }
+        }
+        switch(nalType)
+        {
+            case NAL_H265_TRAIL_N:
+            case NAL_H265_TRAIL_R:
+            case NAL_H265_TSA_N:
+            case NAL_H265_TSA_R:
+            case NAL_H265_STSA_N:
+            case NAL_H265_STSA_R:
+            case NAL_H265_BLA_W_LP:
+            case NAL_H265_BLA_W_RADL:
+            case NAL_H265_BLA_N_LP:
+            case NAL_H265_IDR_W_RADL:
+            case NAL_H265_IDR_N_LP:
+            case NAL_H265_CRA_NUT:
+            case NAL_H265_RADL_N:
+            case NAL_H265_RADL_R:
+            case NAL_H265_RASL_N:
+            case NAL_H265_RASL_R:
+            {
+                if(length > SLICE_HEADER_SAMPLE_SIZE)
+                    length = SLICE_HEADER_SAMPLE_SIZE;
+                ADM_info("Trying to decode slice header, NALU %d (%s)\n",nalType,nalTypeToString(nalType));
+                return decodeSliceHeaderH265(buffer, buffer+length, flags, spsinfo, poc);
+            }
+            default:
+                ADM_info("Skipping NALU of type %d (%s)\n",nalType,nalTypeToString(nalType));
+                break;
+        }
+        buffer = head;
+        nalType = prevNaluType;
+    }
+    ADM_warning("No picture slice found in the buffer.\n");
+    return false;
+}
+
+/**
+ *  \fn ADM_getNalSizeH265
+ *  \brief extract NALU length size from hvcC header
+ */
+uint32_t ADM_getNalSizeH265(uint8_t *extra, uint32_t len)
+{
+    if(len < 24)
+    {
+        ADM_warning("Invalid HEVC extradata length %u\n",len);
+        return 0;
+    }
+    if(extra[0] != 1)
+    {
+        ADM_warning("Invalid HEVC extradata.\n");
+        return 0;
+    }
+    return (extra[22] & 3) + 1;
 }
 // EOF

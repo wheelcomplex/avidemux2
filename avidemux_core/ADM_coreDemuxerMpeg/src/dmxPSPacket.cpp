@@ -51,7 +51,7 @@ psPacket::~psPacket()
     \fn open
     \brief dtor
 */
-bool psPacket::open(const char *filenames,FP_TYPE append)
+bool psPacket::open(const char *filenames,int append)
 {
     _file=new fileParser();
     if(!_file->open(filenames,&append))
@@ -82,7 +82,9 @@ bool psPacket::close(void)
 */
 uint64_t    psPacket::getPos(void)
 {
-    return 0;
+    uint64_t pos;
+    _file->getpos(&pos);
+    return pos;
 }
 /**
     \fn setPos
@@ -669,10 +671,11 @@ bool psPacketLinearTracker::decodeVobuPCI(uint32_t size,uint8_t *data)
         lastVobuPosition=nextVobuPosition;
         lastVobuEnd=nextVobuEnd;
 
+        nextVobuStart=start;
         nextVobuEnd=end;
         _file->getpos(&nextVobuPosition);
 #if 0
-        ADM_info("At : 0x%"PRIx64", Vobu start : %d end: %d seqEnd:%d\n",nextVobuPosition,start,end,seqEnd);
+        ADM_info("At : 0x%" PRIx64", Vobu start : %d end: %d seqEnd:%d\n",nextVobuPosition,start,end,seqEnd);
       
 #endif
 
@@ -760,6 +763,68 @@ bool           psPacketLinearTracker::resetStats(void)
         p->startDts=ADM_NO_PTS;
     }
     return true;
+}
+/**
+    \fn collectStats
+    \brief Read from current position until we get the stats for pid, then seek back
+*/
+bool psPacketLinearTracker::collectStats(uint8_t pid)
+{
+    packetStats *s=stats;
+    s+=pid;
+    memset(s,0,sizeof(packetStats));
+    s->startDts=ADM_NO_PTS;
+
+    const uint32_t len=100*1024;
+    uint8_t *buffer=(uint8_t *)malloc(len);
+    if(!buffer) return false;
+
+    const uint32_t remember=consumed;
+    uint32_t size;
+    uint64_t dts,pts,startAt;
+    bool success=false;
+    uint8_t tmppid;
+
+    dmxPacketInfo info;
+    getInfo(&info);
+
+#define MAX_CONSUMED (1<<24)
+
+    while(true)
+    {
+        if(false==getPacket(len,&tmppid,&size,&pts,&dts,buffer,&startAt))
+            break;
+        if(tmppid==0x60) // VOBU PCI
+        {
+            decodeVobuPCI(size,buffer);
+            continue;
+        }
+        if(tmppid!=pid)
+            continue;
+        uint64_t ts=pts;
+        if(ts==ADM_NO_PTS) ts=dts;
+        if(ts!=ADM_NO_PTS)
+        {
+            s->startCount=s->count;
+            s->startAt=startAt;
+            s->startSize=s->size;
+            s->startDts=ts;
+            success=true;
+            break;
+        }
+        s->count++;
+        s->size+=size;
+        if(consumed>remember && consumed-remember>MAX_CONSUMED)
+            break;
+    }
+
+#undef MAX_CONSUMED
+
+    free(buffer);
+    buffer=NULL;
+    consumed=remember;
+    seek(info.startAt,info.offset);
+    return success;
 }
 /**
     \fn findStartCode

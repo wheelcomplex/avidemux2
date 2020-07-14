@@ -63,7 +63,7 @@ int round=nbTry;
     \fn open
     \brief dtor
 */
-bool tsPacket::open(const char *filenames,FP_TYPE append)
+bool tsPacket::open(const char *filenames, int append)
 {
     _file=new fileParser();
     if(!_file->open(filenames,&append))
@@ -233,7 +233,6 @@ nextPack:
     int payloadUnitStart=scratch[0]&0x40;
     int fieldControl=(scratch[2]>>4)&3;
     int continuity=(scratch[2]&0xf);
-    int len=TS_PACKET_LEN-4; // useful datas
 
     pkt->continuityCounter=continuity;
     pkt->payloadStart=payloadUnitStart;
@@ -308,7 +307,6 @@ nextPack2:
     if(!nbRetries)
         startOffset=pkt.startAt;
     nbRetries++;
-    uint32_t tableId;
     uint32_t sectionLength=0;
     uint32_t transportStreamId=0;
     uint32_t dummy;
@@ -482,9 +480,8 @@ bool tsPacket::decodePesHeader(TS_PESpacket *pes)
 {
     uint8_t  *start=pes->payload+6;
     uint8_t  *end=pes->payload+pes->payloadSize;
-    uint8_t  stream=pes->payload[3];
     uint32_t packLen=(pes->payload[4]<<8)+(pes->payload[5]);
-    int      align=0,c;
+    int      c;
 
 
     pes->dts=ADM_NO_PTS;
@@ -502,7 +499,6 @@ bool tsPacket::decodePesHeader(TS_PESpacket *pes)
     if((c&0xc0)!=0x80) fail("No Mpeg2 marker");
     
         uint32_t ptsdts,len;
-        if(c & 4) align=1;      
         c=*start++;     // PTS/DTS
         //printf("%x ptsdts\n",c
         ptsdts=c>>6;
@@ -530,8 +526,7 @@ bool tsPacket::decodePesHeader(TS_PESpacket *pes)
                                 #define PTS11_ADV 10 // nut monkey
                                 if(len>=PTS11_ADV)
                                 {
-                                        uint32_t skip=PTS11_ADV;
-                                        uint64_t pts1,pts2,dts,pts0;
+                                        uint64_t pts1,pts2,pts0;
                                                 //      printf("\n PTS10\n");
                                                 pts0=start[0];  
                                                 pts1=(start[1]<<8)+start[2]; 
@@ -563,14 +558,14 @@ bool tsPacket::decodePesHeader(TS_PESpacket *pes)
         if(packLen)
         {
             //printf("***Zimbla***\n");
-            if(packLen<sizeCheck) 
+            if((int)packLen<sizeCheck)
             {
                 tail=sizeCheck-packLen;
                 pes->payloadSize-=tail; 
                 ADM_warning("[TS Packet]extra crap at the end %d\n",tail);
             }
             else
-                if(packLen>sizeCheck)
+                if((int)packLen>sizeCheck)
                 {
                     ADM_warning("[TS Packet] PackLen=%d, avalailble=%d\n",packLen,sizeCheck);
                     fail("Pes too long");
@@ -605,11 +600,8 @@ nextPackx:
     count++;
     if(count>MAX_SKIPPED_PACKET) return false;
     *pid=id;
-    
-    int payloadUnitStart=scratch[0]&0x40;
+
     int fieldControl=(scratch[2]>>4)&3;
-    int continuity=(scratch[2]&0xf);
-    int len=TS_PACKET_LEN-4; // useful datas
 
     if(!(fieldControl & 1)) 
     {
@@ -665,8 +657,10 @@ bool tsPacketLinear::refill(void)
         if(false==getNextPES(pesPacket))
         {
                 printf("[tsPacketLinear] Refill failed for pid : 0x%x (%d)\n",pesPacket->pid,pesPacket->pid);
+                eof=true;
                 return false;
         }
+        eof=false;
         return true;
 }
 #ifndef TS_PACKET_INLINE
@@ -681,12 +675,8 @@ uint8_t tsPacketLinear::readi8(void)
         return pesPacket->payload[pesPacket->offset++];
     }
     if(false==refill()) 
-    {
-        eof=1;
         return 0;
-    }
     return pesPacket->payload[pesPacket->offset++];
-    
 }
 
 /**
@@ -897,6 +887,24 @@ tsPacketLinearTracker::tsPacketLinearTracker(uint32_t pid,listOfTsAudioTracks *a
     }
 }
 /**
+    \fn resetStats
+*/
+bool tsPacketLinearTracker::resetStats(void)
+{
+    if(!stats) return false;
+    for(uint32_t i=0; i<totalTracks; i++)
+    {
+        packetTSStats *s=stats+i;
+        s->count=0;
+        s->size=0;
+        s->startAt=0;
+        s->startCount=0;
+        s->startSize=0;
+        s->startDts=ADM_NO_PTS;
+    }
+    return true;
+}
+/**
     \fn findStartCode
     \brief Must check stillOk after calling this
 */
@@ -1007,11 +1015,8 @@ bool tsPacketLinearTracker::updateStats(uint8_t *scratch)
         if(id==stats[i].pid) found=i;
     if(found==-1) return false;
 
-    
     int payloadUnitStart=scratch[0]&0x40;
     int fieldControl=(scratch[2]>>4)&3;
-    int continuity=(scratch[2]&0xf);
-
 
     if(!payloadUnitStart) return false; // no PES start in here...
 
@@ -1113,8 +1118,7 @@ bool tsPacketLinearTracker::updateStats(uint8_t *scratch)
                                 #define PTS11_ADV 10 // nut monkey
                                 if(len>=PTS11_ADV)
                                 {
-                                        uint32_t skip=PTS11_ADV;
-                                        uint64_t pts1,pts2,dts,pts0;
+                                        uint64_t pts1,pts2,pts0;
                                                 //      printf("\n PTS10\n");
                                                 pts0=start[0];  
                                                 pts1=(start[1]<<8)+start[2]; 
@@ -1142,5 +1146,81 @@ bool tsPacketLinearTracker::updateStats(uint8_t *scratch)
        
 
     return true;
+}
+/**
+    \fn collectStats
+    \brief Read from current position until we get the stats, then seek back
+*/
+bool tsPacketLinearTracker::collectStats(void)
+{
+    if(!resetStats()) // no audio tracks, nothing to do
+        return false;
+
+    bool success=false;
+    uint32_t i,found=0,count=0;
+    const uint32_t max=1<<24; // 16 MiB, should be enough
+    const uint32_t remember=consumed;
+    dmxPacketInfo info;
+    getInfo(&info);
+
+    const uint32_t len=sizeof(packetTSStats)*totalTracks;
+    packetTSStats *first=(packetTSStats *)malloc(len);
+    if(!first)
+        return false;
+
+    memset(first,0,len);
+    for(i=0; i<totalTracks; i++)
+    {
+        first[i].startDts=ADM_NO_PTS;
+    }
+
+    while(count<max && stillOk())
+    {
+        count++;
+        readi8();
+        for(i=0; i<totalTracks; i++)
+        {
+            if(first[i].startAt) continue; // already set
+            if(stats[i].startAt)
+            {
+#define CPY(x) first[i].x = stats[i].x;
+                CPY(pid)
+                CPY(count)
+                CPY(size)
+                CPY(startAt)
+                CPY(startCount)
+                CPY(startSize)
+                CPY(startDts)
+                found++;
+#undef CPY
+            }
+        }
+        if(found==totalTracks)
+        {
+            success=true;
+            break;
+        }
+    }
+    // Now sync back
+    for(i=0; i<totalTracks; i++)
+    {
+        if(!first[i].startAt) continue;
+#define CPY(x) stats[i].x = first[i].x;
+        CPY(pid)
+        CPY(count)
+        CPY(size)
+        CPY(startAt)
+        CPY(startCount)
+        CPY(startSize)
+        CPY(startDts)
+#undef CPY
+    }
+    free(first);
+    first=NULL;
+
+    ADM_info("Stats for %u tracks out of %u populated, bytes used: %u\n",found,totalTracks,count);
+    consumed=remember;
+    seek(info.startAt,info.offset);
+    return success;
 }
 // EOF

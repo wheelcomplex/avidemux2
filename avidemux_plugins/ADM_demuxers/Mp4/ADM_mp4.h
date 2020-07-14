@@ -149,6 +149,24 @@ public:
 /**
  * 
  */
+class mp4TrexInfo
+{
+public:
+    uint32_t trackID;
+    uint32_t sampleDesc;
+    uint32_t defaultDuration;
+    uint32_t defaultSize;
+    uint32_t defaultFlags;
+
+    mp4TrexInfo()
+    {
+        trackID=sampleDesc=0;
+        defaultDuration=defaultSize=defaultFlags=0;
+    }
+};
+/**
+ * 
+ */
 class mp4Fragment
 {
 public:
@@ -186,6 +204,7 @@ protected:
           uint64_t                      delayRelativeToVideo;
           uint8_t                       lookupMainAtoms(void *tom);
           void                          parseMvhd(void *tom);
+          uint8_t                       parseTrex(void *ztom);
           uint8_t                       parseTrack(void *ztom);
           uint8_t                       parseElst(void *tom,int64_t *delay,int64_t *skip);
           bool                          parseMoof(adm_atom &son);
@@ -225,6 +244,8 @@ protected:
         int64_t                       _currentDelay;
         int64_t                       _currentStartOffset;
         Mp4Flavor                     _flavor;
+        mp4TrexInfo                   *_trexData[_3GP_MAX_TRACKS];
+        uint32_t                      nbTrex;
         uint8_t                       parseAtomTree(adm_atom *atom);
         ADM_mp4AudioAccess            *audioAccess[_3GP_MAX_TRACKS-1];
         ADM_audioStream               *audioStream[_3GP_MAX_TRACKS-1];

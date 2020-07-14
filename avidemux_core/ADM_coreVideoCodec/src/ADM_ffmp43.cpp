@@ -162,8 +162,8 @@ decoderFF::decoderFF (uint32_t w, uint32_t h,uint32_t fcc, uint32_t extraDataLen
             :decoders (w, h,fcc,extraDataLen,extraData,bpp)
 {
 	resetConfiguration();
-
   hurryUp=false;
+  _initCompleted=false;
   _drain=false;
   _done=false;
   _keepFeeding=false;
@@ -184,7 +184,7 @@ decoderFF::decoderFF (uint32_t w, uint32_t h,uint32_t fcc, uint32_t extraDataLen
   _frame=av_frame_alloc();
   if(!_frame)
   {
-      ADM_assert (_frame);
+      return;
   }
 
   printf ("[lavc] Build: %d\n", LIBAVCODEC_BUILD);
@@ -231,6 +231,13 @@ decoderFF::~decoderFF ()
   }
   delete hwDecoder;
   hwDecoder=NULL;
+}
+/**
+ * \fn initialized
+ */
+bool decoderFF::initialized(void)
+{
+    return _initCompleted;
 }
 /**
  * 
@@ -373,7 +380,7 @@ bool   decoderFF::uncompress (ADMCompressedImage * in, ADMImage * out)
  
   //printf("Frame size : %d\n",in->dataLength);
 
-    if (in->dataLength == 0 && !_allowNull) // Null frame, silently skipped
+    if (!_drain && in->dataLength == 0 && !_allowNull) // Null frame, silently skipped
     {
         printf ("[Codec] null frame\n");
         out->_noPicture = 1;
@@ -405,6 +412,13 @@ bool   decoderFF::uncompress (ADMCompressedImage * in, ADMImage * out)
             pkt.flags=0;
 
         avcodec_send_packet(_context, &pkt);
+        // HW accel may be setup by now if this has been the very first packet. In this case
+        // ask the hw decoder to collect the decoded picture.
+        if(hwDecoder)
+        {
+            hwDecoder->skipSendFrame();
+            return hwDecoder->uncompress(in,out);
+        }
     }
 
     ret = avcodec_receive_frame(_context, _frame);

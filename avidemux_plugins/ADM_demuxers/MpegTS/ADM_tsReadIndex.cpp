@@ -22,13 +22,13 @@ using std::string;
 #include "ADM_default.h"
 #include "fourcc.h"
 #include "DIA_coreToolkit.h"
+#include "ADM_coreUtils.h"
 #include "ADM_indexFile.h"
 #include "ADM_ts.h"
 #include "ADM_string.h"
 
 #include <math.h>
 #define TS_MAX_LINE 10000
-extern uint8_t  mk_hex(uint8_t a, uint8_t b);;
 /**
         \fn readIndex
         \brief Read the [video] section of the index file
@@ -174,24 +174,16 @@ bool tsHeader::processVideoIndex(char *buffer)
                 }
                 switch(picStruct)
                 {
-                        default: ADM_warning("Unknown picture structure %c\n",picStruct);
-                        case 'F': frame->pictureType=AVI_FRAME_STRUCTURE;break;
+                        case 'F':
+                        case 'C':
+                        case 'S': frame->pictureType=AVI_FRAME_STRUCTURE;break;
                         case 'T': frame->pictureType=AVI_FIELD_STRUCTURE+AVI_TOP_FIELD;break;
                         case 'B': frame->pictureType=AVI_FIELD_STRUCTURE+AVI_BOTTOM_FIELD;break;
-
+                        default: ADM_warning("Unknown picture structure %c\n",picStruct);break;
                 }
                 frame->len=len;
-                if(!interlaced && (frame->pictureType & AVI_FIELD_STRUCTURE))
-                {
-                    printf("[processVideoIndex] Setting interlaced flag.\n");
-                    interlaced=true;
-                    // Set fps to field rate for interlaced H.264 streams, necessary for copy mode
-                    if(_videostream.fccHandler==fourCC::get((uint8_t *)"H264"))
-                    {
-                        _videostream.dwRate*=2;
-                        printf("[processVideoIndex] Doubling fps1000 for interlaced H.264, new value = %d\n",_videostream.dwRate);
-                    }
-                }
+                if(frame->pictureType & AVI_FIELD_STRUCTURE)
+                    fieldEncoded=true;
                 ListOfFrames.push_back(frame);
                 count++;
                 if(!next) 
@@ -277,10 +269,12 @@ bool    tsHeader::readVideo(indexFile *index)
         return false;
     }
 
-    interlaced=index->getAsUint32("Interlaced");
+    if(index->getAsUint32("Interlaced"))
+        printf("[tsDemux] Video is interlaced.\n");
     
     _video_bih.biWidth=_mainaviheader.dwWidth=w ;
     _video_bih.biHeight=_mainaviheader.dwHeight=h;
+    _mainaviheader.dwMicroSecPerFrame=0;
     switch(fps)
     {
         case 23976:
@@ -302,6 +296,7 @@ bool    tsHeader::readVideo(indexFile *index)
         default:
             _videostream.dwScale=1;
             _videostream.dwRate=90000;
+            _mainaviheader.dwMicroSecPerFrame=ADM_UsecFromFps1000(fps);
             break;
     }
     return true;
@@ -326,7 +321,7 @@ bool    tsHeader::readAudio(indexFile *index,const char *name)
     for(int i=0;i<nbTracks;i++)
     {
         char header[40];
-        char body[40];
+        char body[80];
         std::string language=ADM_UNKNOWN_LANGUAGE;
         uint32_t fq,chan,br,codec,pid,muxing=0;
         sprintf(header,"Track%d.",i);
@@ -388,7 +383,8 @@ bool    tsHeader::readAudio(indexFile *index,const char *name)
         {
             ADM_info("No extradata (%s)\n",body);
         }
-        bool append=(bool)index->getAsUint32("Append");
+        int append=index->getAsUint32("Append");
+        ADM_assert(append>=0);
         ADM_tsAccess *access=new ADM_tsAccess(name,pid,append,(ADM_TS_MUX_TYPE)muxing,extraLen,extraData);
         if(extraData) delete [] extraData;
         extraData=NULL;

@@ -134,9 +134,18 @@ bool        ADM_EditorSegment::addReferenceVideo(_VIDEOS *ref)
     ADM_info("Original frame increment %s = %" PRIu64" us\n",ADM_us2plain(ref->timeIncrementInUs),ref->timeIncrementInUs);
     uint64_t minDelta=100000;
     uint64_t maxDelta=0;
-    uint32_t fmin=0,fmax=0;
+    uint32_t flags,fmin=0,fmax=0;
     for (uint32_t frame=0; frame<info.nb_frames; frame++)
     {
+        if(!ref->fieldEncoded)
+        {
+            demuxer->getFlags(frame,&flags);
+            if(flags & AVI_FIELD_STRUCTURE)
+            {
+                ADM_info("Ref video is field-encoded.\n");
+                ref->fieldEncoded=true;
+            }
+        }
         if (demuxer->getPtsDts(frame,&pts,&dts) && dts!=ADM_NO_PTS && dts!=0)
         {
             if (firstNonZeroDts==ADM_NO_PTS)
@@ -145,10 +154,18 @@ bool        ADM_EditorSegment::addReferenceVideo(_VIDEOS *ref)
                 firstNonZeroDtsFrame=frame;
                 continue;
             }
-
-            uint64_t probedTimeIncrement=(dts-firstNonZeroDts)/(frame-firstNonZeroDtsFrame);
-            if(probedTimeIncrement<minDelta) { minDelta=probedTimeIncrement; fmin=frame; }
-            if(probedTimeIncrement>maxDelta) { maxDelta=probedTimeIncrement; fmax=frame; }
+            if(dts>firstNonZeroDts)
+            {
+                uint64_t probedTimeIncrement=(dts-firstNonZeroDts)/(frame-firstNonZeroDtsFrame);
+                if(probedTimeIncrement<minDelta) { minDelta=probedTimeIncrement; fmin=frame; }
+                if(probedTimeIncrement>maxDelta) { maxDelta=probedTimeIncrement; fmax=frame; }
+            }else if(dts==firstNonZeroDts)
+            {
+                ADM_warning("Duplicate DTS %s at frame %d\n",ADM_us2plain(dts),frame);
+            }else
+            {
+                ADM_warning("DTS going back by %" PRIu64" at frame %d\n",firstNonZeroDts-dts,frame);
+            }
             firstNonZeroDts=dts;
             firstNonZeroDtsFrame=frame;
         }
@@ -180,7 +197,6 @@ bool        ADM_EditorSegment::addReferenceVideo(_VIDEOS *ref)
     seg._durationUs=demuxer->getVideoDuration();
 
     // Set the default startTime to the pts of first Pic
-    uint32_t flags;
     demuxer->getFlags(0,&flags);
     demuxer->getPtsDts(0,&pts,&dts);
     ref->firstFramePts=0;
@@ -250,12 +266,15 @@ bool ADM_EditorSegment::deleteAll (void)
           v->_aviheader->close ();
           delete v->_aviheader;
       }
+      if(v->infoCache)
+          delete [] v->infoCache;
       if(v->paramCache)
           delete [] v->paramCache;
       v->_videoCache=NULL;
       v->color=NULL;
       v->decoder=NULL;
       v->_aviheader=NULL;
+      v->infoCache=NULL;
       v->paramCache=NULL;
      // Delete audio codec too
      // audioStream will be deleted by the demuxer
@@ -812,7 +831,14 @@ void ADM_EditorSegment::dumpRefVideos(void)
         return false;
     }
     deltaFrame=frame-deltaFrame;
-    *dts=d+deltaFrame*vid->timeIncrementInUs;
+    d+=deltaFrame*vid->timeIncrementInUs;
+    if(d>pts)
+    {
+        ADM_warning("Calculated DTS=%" PRIu64" > PTS=%" PRIu64"\n",d,pts);
+        *dts=pts;
+        return false;
+    }
+    *dts=d;
     return true;
 }
 /**

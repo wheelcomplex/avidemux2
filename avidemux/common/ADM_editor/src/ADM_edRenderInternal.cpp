@@ -237,6 +237,7 @@ bool ADM_Composer::DecodeNextPicture(uint32_t ref)
             ADM_warning("getFrame failed for frame %" PRIu32"\n",frame);
             drain=true;
             vid->decoder->setDrainingState(true);
+            img.dataLength=0;
         }else
         {
             endOfStream=false;
@@ -287,7 +288,7 @@ bool ADM_Composer::DecodeNextPicture(uint32_t ref)
         aprintf("[Editor] No PTS, guessing value\n");
         aprintf("Image Pts : %s\n",ADM_us2plain(img.demuxerPts));
         aprintf("Image Dts : %s\n",ADM_us2plain(img.demuxerDts));
-        vid->lastDecodedPts+=vid->timeIncrementInUs;
+        vid->lastDecodedPts += vid->timeIncrementInUs * (vid->fieldEncoded ? 2 : 1);
         uint64_t pts=img.demuxerPts;
         uint64_t dts=img.demuxerDts;
         uint32_t origin=0;

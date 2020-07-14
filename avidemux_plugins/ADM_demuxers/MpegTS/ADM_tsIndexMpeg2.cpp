@@ -40,18 +40,15 @@ static const uint32_t FPS[16]={
 uint8_t TsIndexerMpeg2::run(const char *file,ADM_TS_TRACK *videoTrac)
 {
 uint32_t temporal_ref,val;
-uint8_t buffer[50*1024];
 bool seq_found=false;
-H264Unit thisUnit;
+H264Unit spsUnit;
 
 beginConsuming=0;
 
 TSVideo video;
 indexerData  data;    
-dmxPacketInfo tmpInfo;
 
 uint8_t result=1;
-bool bAppend=false;
 
     listOfUnits.clear();
 
@@ -75,34 +72,66 @@ bool bAppend=false;
         return 0;
     }
     
-    pkt=new tsPacketLinearTracker(videoTrac->trackPid, audioTracks);
-    
-    FP_TYPE append=FP_DONT_APPEND;
+    int append=0;
 #ifdef ASK_APPEND_SEQUENCED
-    if(true==ADM_probeSequencedFile(file))
+    append=1;
     {
-        if(true==GUI_Question(QT_TRANSLATE_NOOP("tsdemuxer","There are several files with sequential file names. Should they be all loaded ?")))
-               bAppend=true;
+    int nbFollowUps=ADM_probeSequencedFile(file,&append);
+    if(nbFollowUps<0)
+    {
+        qfclose(index);
+        index=NULL;
+        return 0;
     }
-    if(true==bAppend)
-        append=FP_APPEND;
+    if(!nbFollowUps || false==GUI_Question(QT_TRANSLATE_NOOP("tsdemuxer","There are several files with sequential file names. Should they be all loaded ?")))
+        append=0;
+    }
 #endif
-    writeSystem(file,bAppend);
-    pkt->open(file,append);
-    gui= createProcessing(QT_TRANSLATE_NOOP("tsdemuxer","Indexing"),pkt->getSize());
+    writeSystem(file,append);
+
+    pkt=new tsPacketLinearTracker(videoTrac->trackPid, audioTracks);
+
+    if(!pkt->open(file,append))
+    {
+        delete pkt;
+        pkt=NULL;
+        audioTracks=NULL;
+        qfclose(index);
+        index=NULL;
+        return 0;
+    }
     data.pkt=pkt;
     fullSize=pkt->getSize();
+    gui=createProcessing(QT_TRANSLATE_NOOP("tsdemuxer","Indexing"),fullSize);
     int startCode;
     decodingImage=false;
 #define likely(x) x
 #define unlikely(x) x
     int lastStartCode=0xb3;
+    bool seqEntryPending=false;
+    bool picEntryPending=false;
 
-#define REMEMBER() { lastStartCode=startCode;}   
+#define REMEMBER() { lastStartCode=startCode;}
+#define CHECK(x) if(false==x) { result=ADM_IGN; goto the_end; }
       while(true)
       {
         startCode=pkt->findStartCode();
         if(!pkt->stillOk()) break;
+
+        if(picEntryPending && startCode!=0xB5) // picture not followed by extension
+        {
+            if(seqEntryPending)
+            {
+                writeVideo(&video,ADM_TS_MPEG2);
+                writeAudio();
+                qfprintf(index,"[Data]");
+                seqEntryPending=false;
+                pkt->collectStats();
+                CHECK(addUnit(data,unitTypeSps,spsUnit,4+4+4))
+            }
+            CHECK(addUnit(data,unitTypePic,thisUnit,4+2))
+            picEntryPending=false;
+        }
 
           switch(startCode)
                   {
@@ -112,13 +141,9 @@ bool bAppend=false;
                           if(seq_found)
                           {
                                 decodingImage=false;
-                                pkt->getInfo(&thisUnit.packetInfo);
-                                thisUnit.consumedSoFar=pkt->getConsumed();
-                                if(!addUnit(data,unitTypeSps,thisUnit,4))
-                                {
-                                    result=ADM_IGN;
-                                    goto the_end;
-                                }
+                                pkt->getInfo(&spsUnit.packetInfo);
+                                spsUnit.consumedSoFar=pkt->getConsumed();
+                                CHECK(addUnit(data,unitTypeSps,spsUnit,4))
                                 pkt->forward(8);  // Ignore
                                 continue;
                           }
@@ -134,19 +159,11 @@ bool bAppend=false;
                           video.ar = (val >> 4) & 0xf;
                           video.fps= FPS[val & 0xf];
                           pkt->forward(4);                      //+4
-                          writeVideo(&video,ADM_TS_MPEG2);
-                          writeAudio();
-                          qfprintf(index,"[Data]");
 
                           decodingImage=false;
-                          pkt->getInfo(&thisUnit.packetInfo);
-                          thisUnit.consumedSoFar=pkt->getConsumed();
-                          if(!addUnit(data,unitTypeSps,thisUnit,4+4+4))
-                          {
-                              result=ADM_IGN;
-                              goto the_end;
-                          }
-                          continue;
+                          pkt->getInfo(&spsUnit.packetInfo);
+                          spsUnit.consumedSoFar=pkt->getConsumed();
+                          seqEntryPending=true;
                           break;
 //#warning FIXME, update pic field info.... It triggers a end-of-pic message as it is
 
@@ -173,9 +190,27 @@ bool bAppend=false;
                                     three=pkt->readi8();
                                     
                                     int picture_structure=one&3;// 1=TOP, 2=BOTTOM, 3=FRAME
-                                    bool tff=!!(two&0x80);;
-                                    bool progressive_frame=!!(three&0x80);;
-                                    updateLastUnitStructure(picture_structure);
+                                    bool tff=!!(two&0x80);
+                                    bool progressive_frame=!!(three&0x80);
+                                    if(!progressive_frame && picture_structure==3)
+                                        picture_structure+=tff? 1 : 2;
+                                    //updateLastUnitStructure(picture_structure);
+                                    if(picEntryPending)
+                                    {
+                                        if(seqEntryPending)
+                                        {
+                                            video.interlaced=(picture_structure!=3);
+                                            writeVideo(&video,ADM_TS_MPEG2);
+                                            writeAudio();
+                                            qfprintf(index,"[Data]");
+                                            seqEntryPending=false;
+                                            pkt->collectStats();
+                                            CHECK(addUnit(data,unitTypeSps,spsUnit,4+4+4))
+                                        }
+                                        updatePicStructure(video,picture_structure);
+                                        CHECK(addUnit(data,unitTypePic,thisUnit,4+2))
+                                    }
+                                    picEntryPending=false;
 #if 0                                                                                
                                     printf("structure %d progressive=%d tff=%d (%x:%x:%x)\n",picture_structure,progressive_frame,tff,one,two,three);
 
@@ -193,15 +228,11 @@ bool bAppend=false;
                   case 0xb8: // GOP
                         REMEMBER()
                           // Update ui                        
-                          if(!seq_found) continue;
+                          if(!seq_found || seqEntryPending) continue;
 
-                          pkt->getInfo(&thisUnit.packetInfo);
-                          thisUnit.consumedSoFar=pkt->getConsumed();
-                          if(!addUnit(data,unitTypeSps,thisUnit,4))
-                          {
-                              result=ADM_IGN;
-                              goto the_end;
-                          }
+                          pkt->getInfo(&spsUnit.packetInfo);
+                          spsUnit.consumedSoFar=pkt->getConsumed();
+                          CHECK(addUnit(data,unitTypeSps,spsUnit,4))
                           break;                                            
                   case 0x00 : // picture
                         {
@@ -227,11 +258,7 @@ bool bAppend=false;
                           pkt->getInfo(&thisUnit.packetInfo);
                           thisUnit.consumedSoFar=pkt->getConsumed();
                           thisUnit.imageType=type;
-                          if(!addUnit(data,unitTypePic,thisUnit,4+2))
-                          {
-                              result=ADM_IGN;
-                              goto the_end;
-                          }
+                          picEntryPending=true;
                           pkt->invalidatePtsDts();
                           data.nbPics++;
                         }

@@ -32,6 +32,7 @@
 #else
 #define aprintf(...) {}
 #endif
+
 /**
     \fn videoIndexer
     \brief index the video Track
@@ -242,7 +243,77 @@ uint8_t mkvHeader::addIndexEntry(uint32_t track,ADM_ebml_file *parser,uint64_t w
             if(rpt)
                 memcpy(readBuffer,_tracks[0].headerRepeat,rpt);
             parser->readBin(readBuffer+rpt,size-3);
-            extractH264FrameType(readBuffer,rpt+size-3,&flags,NULL,NULL,&_H264Recovery);
+            // Deal with Matroska files containing Annex-B type of H.264 stream
+            bool AnnexB=false;
+            if(!_tracks[0].extraDataLen && rpt+size > 3 && !readBuffer[0] && !readBuffer[1])
+            {
+                uint32_t mark=(readBuffer[2] << 8) + readBuffer[3];
+                if(mark == 1 || (mark > 0xFF && mark < 0x200 && rpt+size-3 != mark+4))
+                    AnnexB=true;
+            }
+            uint32_t nalSize=0;
+            if(_tracks[0].extraDataLen)
+                nalSize=ADM_getNalSizeH264(_tracks[0].extraData, _tracks[0].extraDataLen);
+            ADM_SPSInfo *info=(ADM_SPSInfo *)_tracks[0].infoCache;
+            uint8_t *sps=_tracks[0].paramCache;
+            uint32_t spsLen=_tracks[0].paramCacheSize;
+            // do we have inband SPS?
+            uint8_t buf[MAX_H264_SPS_SIZE];
+            uint32_t inBandSpsLen=0;
+            if(!AnnexB)
+                inBandSpsLen=getRawH264SPS(readBuffer, rpt+size-3, nalSize, buf, MAX_H264_SPS_SIZE);
+            else
+                inBandSpsLen=getRawH264SPS_startCode(readBuffer, rpt+size-3, buf, MAX_H264_SPS_SIZE);
+            bool match=true;
+            if(inBandSpsLen > 1) // else likely misdetected Annex-B start code
+            {
+                if(inBandSpsLen!=spsLen)
+                    ADM_warning("SPS length mismatch: %u (old) vs %u (new)\n",spsLen,inBandSpsLen);
+                match=!memcmp(buf, sps, (spsLen>inBandSpsLen)? inBandSpsLen : spsLen);
+            }
+            if(!match)
+            {
+                ADM_warning("SPS mismatch? Checking deeper...\n");
+                ADM_SPSInfo info2;
+                if(extractSPSInfoFromData(buf,inBandSpsLen,&info2))
+                {
+                    const uint32_t sz=sizeof(ADM_SPSInfo);
+                    if(!info)
+                    {
+                        _tracks[0].infoCache=new uint8_t[sz];
+                        memcpy(_tracks[0].infoCache, &info2, sz);
+                        _tracks[0].infoCacheSize=sz;
+                    }else
+                    {
+#define MATCH(x) if(info->x != info2.x) { ADM_warning("%s value does not match.\n",#x); info->x = info2.x; match=false; }
+                        match=true;
+                        MATCH(width) // FIXME: dimensions mismatch should be fatal
+                        MATCH(height)
+                        MATCH(CpbDpbToSkip)
+                        MATCH(hasPocInfo)
+                        MATCH(log2MaxFrameNum)
+                        MATCH(log2MaxPocLsb)
+                        MATCH(frameMbsOnlyFlag)
+                        MATCH(refFrames)
+                        if(!match)
+                        {
+                            ADM_warning("Codec parameters change on the fly at frame %u, expect problems.\n",Track->index.size());
+                            // Nevertheless, update the cached info
+                            memcpy(_tracks[0].infoCache, &info2, sz);
+                        }
+                    }
+                    // Update cached raw SPS
+                    if(_tracks[0].paramCache)
+                        delete [] _tracks[0].paramCache;
+                    _tracks[0].paramCache=new uint8_t[inBandSpsLen];
+                    memcpy(_tracks[0].paramCache, buf, inBandSpsLen);
+                    _tracks[0].paramCacheSize=inBandSpsLen;
+                }
+            }
+            if(AnnexB)
+                extractH264FrameType_startCode(readBuffer, rpt+size-3, &flags, NULL, info, &_H264Recovery);
+            else
+                extractH264FrameType(readBuffer, rpt+size-3, nalSize, &flags, NULL, info, &_H264Recovery);
             if(flags & AVI_KEY_FRAME)
             {
                 printf("[MKV/H264] Frame %" PRIu32" is a keyframe\n",(uint32_t)Track->index.size());
@@ -272,10 +343,12 @@ uint8_t mkvHeader::addIndexEntry(uint32_t track,ADM_ebml_file *parser,uint64_t w
             parser->readBin(readBuffer+rpt,size-3);
             uint8_t *begin=readBuffer;
             uint8_t *end=readBuffer+size-3+rpt;
+            bool following=false;
+            int picFound=0;
             while(begin<end)
             {
                 int code=mkvFindStartCode(begin,end);
-                if(code==-1)
+                if(!picFound && code==-1)
                 {
                     ADM_warning("[Mpg2InMkv]No startcode found\n");
                     break;
@@ -285,6 +358,10 @@ uint8_t mkvHeader::addIndexEntry(uint32_t track,ADM_ebml_file *parser,uint64_t w
                 {
                     int picType=begin[1]>>3;
                     begin+=4;
+                    picFound++;
+                    following=true;
+                    if(picFound>1)
+                        continue;
                     picType&=7;
                     switch(picType)
                     {
@@ -294,7 +371,38 @@ uint8_t mkvHeader::addIndexEntry(uint32_t track,ADM_ebml_file *parser,uint64_t w
                         case 3: ix.flags=AVI_B_FRAME;break;
                         default: ADM_warning("[Mpeg2inMkv]Bad pictype : %d\n",picType);
                     }
-                    break;
+                }
+                if(code==0xB5) // extension
+                {
+                    int id=(begin[0]<<8)+begin[1];
+                    id>>=12;
+                    begin+=2;
+                    if(id!=8)
+                    {
+                        following=false;
+                        continue;
+                    }
+                    if(picFound>1)
+                    {
+                        //printf("Multiple pics in a single buffer, clearing field structure.\n");
+                        ix.flags &= ~AVI_STRUCTURE_TYPE_MASK;
+                        break;
+                    }
+                    if(!following)
+                    {
+                        ADM_warning("Skipping picture coding extension not following picture.\n");
+                        begin+=3;
+                        continue;
+                    }
+                    following=false;
+                    int picStruct=begin[0]&3;
+                    begin+=3; // skip also parity and progressive flags
+                    switch(picStruct)
+                    {
+                        case 1: ix.flags|=AVI_TOP_FIELD+AVI_FIELD_STRUCTURE; break;
+                        case 2: ix.flags|=AVI_BOTTOM_FIELD+AVI_FIELD_STRUCTURE; break;
+                        default:break;
+                    }
                 }
             }
         }else if(isVC1Compatible(_videostream.fccHandler))

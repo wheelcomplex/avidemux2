@@ -60,6 +60,9 @@ public:
 protected:
         bool            extractExtraDataH264();
         bool            extractExtraDataH265();
+private:
+        bool            extractExtraDataH264Internal(void);
+        bool            extractExtraDataH265Internal(void);
 };
 /**
         \fn ADM_videoStreamCopyToAnnexB
@@ -110,6 +113,7 @@ protected:
 #define ADM_H264_MAX_SEI_LENGTH 2048
         uint8_t         seiBuf[ADM_H264_MAX_SEI_LENGTH];
         uint32_t        seiLen;
+        uint32_t        nalSize;
 public:
                         ADM_videoStreamCopySeiInjector(uint64_t startTime,uint64_t endTime);
         virtual         ~ADM_videoStreamCopySeiInjector();

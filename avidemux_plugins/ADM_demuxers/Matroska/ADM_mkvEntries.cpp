@@ -20,7 +20,8 @@
 #include "ADM_Video.h"
 
 #include "fourcc.h"
-
+#include "ADM_codecType.h"
+#include "ADM_videoInfoExtractor.h"
 #include "ADM_mkv.h"
 
 #include "mkv_tags.h"
@@ -235,6 +236,32 @@ uint8_t mkvHeader::analyzeOneTrack(void *head,uint32_t headlen)
             _tracks[0].extraData=entry.extraData;
             _tracks[0].extraDataLen=entry.extraDataLen;
         }
+        if(isH264Compatible(entry.fcc) && _tracks[0].extraData
+            && _tracks[0].extraDataLen > 8 // FIXME
+            && (_tracks[0].extraData[5] & 0x1F) == 1) // 1x SPS
+        {
+            ADM_SPSInfo info;
+            if(extractSPSInfo_mp4Header(_tracks[0].extraData, _tracks[0].extraDataLen, &info))
+            {
+                uint32_t sz=sizeof(ADM_SPSInfo);
+                if(_tracks[0].infoCache)
+                    delete [] _tracks[0].infoCache;
+                _tracks[0].infoCache=new uint8_t[sz];
+                memcpy(_tracks[0].infoCache, &info, sz);
+                _tracks[0].infoCacheSize=sz;
+                // now copy SPS to the raw parameter sets cache
+                uint8_t *p=_tracks[0].extraData;
+                sz=(*(p+6)<<8)+*(p+7);
+                if(_tracks[0].extraDataLen > sz+8)
+                {
+                    if(_tracks[0].paramCache)
+                        delete [] _tracks[0].paramCache;
+                    _tracks[0].paramCache=new uint8_t[sz];
+                    memcpy(_tracks[0].paramCache,p+8,sz);
+                    _tracks[0].paramCacheSize=sz;
+                }
+            }
+        }
         _tracks[0].streamIndex=entry.trackNo;
 
         uint32_t hdr=entry.headerRepeatSize;
@@ -253,9 +280,6 @@ uint8_t mkvHeader::analyzeOneTrack(void *head,uint32_t headlen)
         t->language=entry.language;
         t->wavHeader.bitspersample=16;
         t->wavHeader.byterate=0; // to be set later
-        t->extraData=entry.extraData;
-        t->extraDataLen=entry.extraDataLen;
-        ADM_info("This track has %d bytes of  extradata\n",t->extraDataLen);
         // MS/ACM : ACMX
         if(0x100001==entry.fcc)
         {
@@ -332,6 +356,9 @@ uint8_t mkvHeader::analyzeOneTrack(void *head,uint32_t headlen)
             t->headerRepeatSize=entry.headerRepeatSize;
             memcpy(t->headerRepeat,entry.headerRepeat,hdr);
         }
+        t->extraData=entry.extraData;
+        t->extraDataLen=entry.extraDataLen;
+        ADM_info("This track has %d bytes of extradata\n",t->extraDataLen);
 
         _nbAudioTrack++;
         return 1;

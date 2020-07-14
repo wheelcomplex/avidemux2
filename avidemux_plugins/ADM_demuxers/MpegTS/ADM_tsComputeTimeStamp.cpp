@@ -7,6 +7,7 @@
 #include "ADM_default.h"
 #include "fourcc.h"
 #include "DIA_coreToolkit.h"
+#include "ADM_coreUtils.h"
 #include "ADM_indexFile.h"
 #include "ADM_ts.h"
 
@@ -23,29 +24,36 @@
         \fn updatePtsDts
         \brief Update the PTS/DTS
 
-TODO / FIXME : Handle wrap
 TODO / FIXME : Handle PTS reordering 
 */
-static uint64_t wrapIt(uint64_t val, uint64_t start)
+static uint64_t wrapIt(uint64_t val, uint64_t start, uint64_t &last, uint32_t &laps)
 {
     if(val==ADM_NO_PTS) return val;
-    if(val>=start) return val-start;
-    uint64_t r;
-        r=val+(1LL<<32);
-        r-=start;
-        return r;
+
+    const uint64_t wraplen=1LL<<32;
+    if(val<start)
+        val+=wraplen;
+    val-=start;
+    if(last>val && last-val >= wraplen/2)
+        laps++;
+    if(laps && val>last && val-last > wraplen/2)
+        laps--;
+    last=val;
+    val+=laps*wraplen;
+    return val;
 }
 bool tsHeader::updatePtsDts(void)
 {
+        uint32_t i;
         uint64_t lastDts=0,lastPts=0,dtsIncrement=0;
 
-
+#if 0
         // For audio, The first packet in the seekpoints happens a bit after the action
         // It means some audio may have been seen since we locked on video.
         // So we compute the DTS of the first real packet
         // by using the size field and byterate and arbitrarily make it begins
         // at video
-        for(int i=0;i<listOfAudioTracks.size();i++)
+        for(i=0;i<listOfAudioTracks.size();i++)
         {
             vector          <ADM_mpgAudioSeekPoint > *seekPoints=&(listOfAudioTracks[i]->access->seekPoints);
             if(!((*seekPoints).size())) continue;
@@ -70,20 +78,34 @@ bool tsHeader::updatePtsDts(void)
 
             }
         }
-
+#endif
 
         // Make sure everyone starts at 0
         // Search first timestamp (audio/video)
-
-        switch( _videostream.dwRate)
+        if(fieldEncoded) // Set fps to field rate, necessary for copy mode
         {
-            case 50000:   dtsIncrement=20000;break;
-            case 25000:   dtsIncrement=40000;break;
-            case 23976:   dtsIncrement=41708;break;
-            case 29970:   dtsIncrement=33367;break;
-            default : dtsIncrement=1;
-                    printf("[psDemux] Fps not handled for DTS increment\n");
-
+            if(_videostream.dwRate<=45000)
+                _videostream.dwRate*=2;
+            else if(!(_videostream.dwScale%2))
+                _videostream.dwScale/=2;
+            _mainaviheader.dwMicroSecPerFrame/=2;
+            printf("[processVideoIndex] Doubling fps for field-encoded video, new time base: %d / %d\n",_videostream.dwScale,_videostream.dwRate);
+        }
+        if(_mainaviheader.dwMicroSecPerFrame)
+        {
+            dtsIncrement=_mainaviheader.dwMicroSecPerFrame;
+        }else
+        {
+            if(_videostream.dwScale==1000)
+                dtsIncrement=ADM_UsecFromFps1000(_videostream.dwRate);
+            else if(_videostream.dwScale && _videostream.dwRate)
+            {
+                double f=_videostream.dwScale;
+                f*=1000.*1000.;
+                f/=_videostream.dwRate;
+                f+=0.49;
+                dtsIncrement=(uint64_t)f;
+            }
         }
         uint64_t startDts=ListOfFrames[0]->dts;
         uint64_t startPts=ListOfFrames[0]->pts;
@@ -99,7 +121,7 @@ bool tsHeader::updatePtsDts(void)
                 ListOfFrames[0]->dts=startDts;
             }
         }
-        for(int i=0;i<listOfAudioTracks.size();i++)
+        for(i=0;i<listOfAudioTracks.size();i++)
         {
             if(!listOfAudioTracks[i]->access->seekPoints.size()) continue;
             uint64_t a=listOfAudioTracks[i]->access->seekPoints[0].dts;
@@ -107,14 +129,17 @@ bool tsHeader::updatePtsDts(void)
         }
         // Rescale all so that it starts ~ 0
         // Video..
-        for(int i=0;i<ListOfFrames.size();i++)
+        uint32_t ptsWrapCount=0;
+        uint32_t dtsWrapCount=0;
+        for(i=0;i<ListOfFrames.size();i++)
         {
             dmxFrame *f=ListOfFrames[i];
-            f->pts=wrapIt(f->pts,startDts);
-            f->dts=wrapIt(f->dts,startDts);
+            f->pts=wrapIt(f->pts,startDts,lastPts,ptsWrapCount);
+            f->dts=wrapIt(f->dts,startDts,lastDts,dtsWrapCount);
         }
+        lastPts=lastDts=0;
         // Audio start at 0 too
-        for(int i=0;i<listOfAudioTracks.size();i++)
+        for(i=0;i<listOfAudioTracks.size();i++)
         {
             ADM_tsTrackDescriptor *track=listOfAudioTracks[i];
             ADM_tsAccess    *access=track->access;
@@ -125,10 +150,10 @@ bool tsHeader::updatePtsDts(void)
         // for video
         // We are sure to have both PTS & DTS for 1st image
         // Guess missing DTS/PTS for video
-        int noUpdate=0;
+        /*int noUpdate=0;*/
         startDts=ListOfFrames[0]->dts;
         ListOfFrames[0]->dts=0;
-        for(int i=0;i<ListOfFrames.size();i++)
+        for(i=0;i<ListOfFrames.size();i++)
         {
             dmxFrame *frame=ListOfFrames[i];
             aprintf("[psUpdate] frame:%d raw DTS: %" PRId64" PTS:%" PRId64"\n",i,frame->dts,frame->pts);
@@ -170,12 +195,12 @@ bool tsHeader::updatePtsDts(void)
         // Now take care of the first frame dts.
         ListOfFrames[0]->dts=timeConvert(startDts);
         // convert to us for Audio tracks (seek points)
-        for(int i=0;i<listOfAudioTracks.size();i++)
+        for(i=0;i<listOfAudioTracks.size();i++)
         {
             ADM_tsTrackDescriptor *track=listOfAudioTracks[i];
             ADM_tsAccess    *access=track->access;
-            
-            for(int j=0;j<access->seekPoints.size();j++)
+            uint32_t j;
+            for(j=0;j<access->seekPoints.size();j++)
             {
                 if( access->seekPoints[j].dts!=ADM_NO_PTS) 
                     access->seekPoints[j].dts=access->timeConvert( access->seekPoints[j].dts);

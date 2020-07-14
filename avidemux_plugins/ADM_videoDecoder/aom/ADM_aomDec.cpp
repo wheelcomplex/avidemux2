@@ -24,6 +24,7 @@
 decoderAom::decoderAom(uint32_t w, uint32_t h, uint32_t fcc, uint32_t extraDataLen, uint8_t *extraData, uint32_t bpp)
     : decoders(w,h,fcc,extraDataLen,extraData,bpp)
 {
+    drain=false;
     alive=false;
     cookie=NULL;
     aom_codec_dec_cfg_t cfg;
@@ -69,11 +70,23 @@ decoderAom::~decoderAom()
     }
 }
 /**
+    \fn flush
+*/
+bool decoderAom::flush(void)
+{
+    drain=false;
+    return true;
+}
+/**
     \fn uncompress
 */
 bool decoderAom::uncompress(ADMCompressedImage *in, ADMImage *out)
 {
-    aom_codec_err_t err=aom_codec_decode(AX, in->data, in->dataLength, NULL);
+    aom_codec_err_t err;
+    if(drain)
+        err=aom_codec_decode(AX, NULL, 0, NULL);
+    else
+        err=aom_codec_decode(AX, in->data, in->dataLength, NULL);
     if(err!=AOM_CODEC_OK)
     {
         ADM_warning("Error %d (%s) decoding AV1 frame.\n",(int)err,aom_codec_err_to_string(err));
@@ -82,12 +95,28 @@ bool decoderAom::uncompress(ADMCompressedImage *in, ADMImage *out)
     aom_image_t *img;
     const void *iter = NULL;
     img = aom_codec_get_frame(AX, &iter);
+    if(drain)
+        ADM_info("Draining AOM decoder, %s.\n", img? "delayed picture received" : "no delayed pictures left");
     if(img)
     {
-        if (img->fmt != AOM_IMG_FMT_I420)
+        ADM_colorspace color = ADM_COLOR_YV12;
+        switch(img->fmt)
         {
-            ADM_warning("Wrong colorspace, expected %d, got %d\n",AOM_IMG_FMT_I420,(int)img->fmt);
-            return false;
+            case AOM_IMG_FMT_I420:
+                if(img->bit_depth == 8) break;
+                ADM_warning("Unsupported bit depth %u for AOM_IMG_FMT_I420 image format.\n",img->bit_depth);
+                return false;
+            case AOM_IMG_FMT_I42016:
+                if(img->bit_depth == 10)
+                {
+                    color = ADM_COLOR_YV12_10BITS;
+                    break;
+                }
+                ADM_warning("Unsupported bit depth %u for AOM_IMG_FMT_I42016 image format.\n",img->bit_depth);
+                return false;
+            default:
+                ADM_warning("Unsupported colorspace 0x%x, bit depth: %u\n",(int)img->fmt,img->bit_depth);
+                return false;
         }
         ADMImageRef *r=out->castToRef();
         if(r)
@@ -98,7 +127,7 @@ bool decoderAom::uncompress(ADMCompressedImage *in, ADMImage *out)
             r->_planeStride[0]=img->stride[0];
             r->_planeStride[1]=img->stride[2];
             r->_planeStride[2]=img->stride[1];
-            r->_colorspace=ADM_COLOR_YV12;
+            r->_colorspace=color;
             r->Pts=in->demuxerPts;
             r->flags=in->flags;
             return true;

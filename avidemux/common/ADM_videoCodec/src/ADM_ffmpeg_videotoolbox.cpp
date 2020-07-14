@@ -131,7 +131,7 @@ decoderFFVT::~decoderFFVT()
 */
 bool decoderFFVT::uncompress(ADMCompressedImage *in, ADMImage *out)
 {
-    if(!in->dataLength ) // Null frame, silently skipped
+    if(!_parent->getDrainingState() && !in->dataLength) // Null frame, silently skipped
     {
         out->_noPicture = 1;
         out->Pts=ADM_COMPRESSED_NO_PTS;
@@ -144,14 +144,8 @@ bool decoderFFVT::uncompress(ADMCompressedImage *in, ADMImage *out)
 
     AVFrame *frame=_parent->getFramePointer();
     ADM_assert(frame);
-    AVPacket pkt;
-    av_init_packet(&pkt);
-    pkt.data=in->data;
-    pkt.size=in->dataLength;
-    if(in->flags&AVI_KEY_FRAME)
-        pkt.flags=AV_PKT_FLAG_KEY;
-    else
-        pkt.flags=0;
+
+    int ret;
 
     if(_parent->getDrainingState())
     {
@@ -160,12 +154,37 @@ bool decoderFFVT::uncompress(ADMCompressedImage *in, ADMImage *out)
             avcodec_send_packet(_context, NULL);
             _parent->setDrainingInitiated(true);
         }
+    }else if(!handover)
+    {
+        AVPacket pkt;
+        av_init_packet(&pkt);
+        pkt.data=in->data;
+        pkt.size=in->dataLength;
+        if(in->flags&AVI_KEY_FRAME)
+            pkt.flags=AV_PKT_FLAG_KEY;
+        else
+            pkt.flags=0;
+
+        ret = avcodec_send_packet(_context, &pkt);
+
+        /* libavcodec doesn't handle switching between field and frame encoded parts of H.264 streams
+        in the way VideoToolbox expects. Proceeding with avcodec_receive_frame as if nothing happened
+        triggers a segfault. As a workaround, retry once with the same data. We do lose one picture. */
+        if(ret == AVERROR_UNKNOWN)
+        {
+            ADM_warning("Unknown error from avcodec_send_packet, retrying...\n");
+            if(!alive)
+                return false; // avoid endless loop
+            alive = false; // misuse, harmless
+            return _parent->uncompress(in,out); // retry
+        }
     }else
     {
-        avcodec_send_packet(_context, &pkt);
+        handover=false;
     }
+    alive = true;
 
-    int ret = avcodec_receive_frame(_context, frame);
+    ret = avcodec_receive_frame(_context, frame);
 
     if(!_parent->decodeErrorHandler(ret))
         return false;

@@ -113,6 +113,7 @@ public:
         virtual bool         getCoupledConf(CONFcouple **couples) ;   /// Return the current filter configuration
 		virtual void setCoupledConf(CONFcouple *couples);
         virtual bool         configure(void) ;                        /// Start graphical user interface
+        virtual bool         goToTime(uint64_t usSeek);
         
 protected:
     void (*filter_line) (uint8_t *dst, const uint8_t  *prev, const uint8_t  *cur, const uint8_t  *next, int w, int prefs, int mrefs, int parity, int mode);
@@ -169,14 +170,20 @@ yadifFilter::yadifFilter(ADM_coreVideoFilter *in, CONFcouple *setup):
 /**
     \fn updateInfo
 */
-
 void yadifFilter::updateInfo(void)
 {
-  memcpy(&info,previousFilter->getInfo(),sizeof(info)); 
-  if(configuration.mode &1 ) // Bob
-  {
-    info.frameIncrement/=2;
-  }
+    memcpy(&info,previousFilter->getInfo(),sizeof(info));
+    if(configuration.mode &1 ) // Bob
+    {
+        info.frameIncrement/=2;
+        if(info.timeBaseNum && info.timeBaseDen)
+        {
+            if(info.timeBaseDen<=30000 && (info.timeBaseNum & 1))
+                info.timeBaseDen*=2;
+            else
+                info.timeBaseNum/=2;
+        }
+    }
 }
 /**
     \fn configure
@@ -243,5 +250,18 @@ const char *yadifFilter::getConfiguration(void)
     return conf;
 }
 
+/**
+    \fn goToTime
+    \brief Seek in filter preview mode
+*/
+bool yadifFilter::goToTime(uint64_t usSeek)
+{
+    uint32_t oldFrameIncrement=info.frameIncrement;
+    if(configuration.mode &1) // Bob
+        info.frameIncrement*=2;
+    bool r=ADM_coreVideoFilterCached::goToTime(usSeek);
+    info.frameIncrement=oldFrameIncrement;
+    return r;
+}
 
 #include "ADM_vidYadif_body.cpp"

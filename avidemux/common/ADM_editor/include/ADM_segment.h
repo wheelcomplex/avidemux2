@@ -61,14 +61,17 @@ public:
       decoders *decoder; /// Video codec
       ADMColorScalerSimple *color; /// Color conversion if needed
       bool              dontTrustBFramePts;
+      bool              fieldEncoded;
       /* Audio part */
       uint32_t currentAudioStream;
       std::vector <ADM_audioStreamTrack *>  audioTracks;
       
 
       uint32_t _nb_video_frames; /// Really needed ?
+      uint32_t infoCacheSize;
+      uint8_t *infoCache; /// Reuse decoded SPS and friends
       uint32_t paramCacheSize;
-      uint8_t *paramCache; /// Reuse decoded SPS and friends
+      uint8_t *paramCache; /// Raw SPS to speed up cut check
       EditorCache *_videoCache; /// Decoded video cache
 
       /* Timeing info */
@@ -83,11 +86,15 @@ public:
 
     _VIDEOS()
     {
+        dontTrustBFramePts=false;
+        fieldEncoded=false;
         currentAudioStream=0;
         _aviheader=NULL;
         decoder=NULL;
         color=NULL;
         _nb_video_frames=0;
+        infoCacheSize=0;
+        infoCache=NULL;
         paramCacheSize=0;
         paramCache=NULL;
         _videoCache=NULL;
@@ -124,6 +131,7 @@ public:
         uint64_t _durationUs; ///
         SegState _dropBframes; /// Internal state machine to know is we should drop bframe that are orphean
         uint64_t _refStartDts;
+        uint64_t _refMinimumPts; /// The PTS in reference of the earliest non-droppable B-frame after given offset
         void clear(void) 
         {
             _reference=0;
@@ -132,6 +140,7 @@ public:
             _durationUs=0;
             _dropBframes=ADM_NO_DROP;
             _refStartDts=0;
+            _refMinimumPts=0;
         }
         _SEGMENT() {clear();}
 };

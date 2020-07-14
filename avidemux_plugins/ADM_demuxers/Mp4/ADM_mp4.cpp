@@ -64,10 +64,12 @@ version 2 media descriptor :
 #include "ADM_mp4.h"
 
 #include "ADM_vidMisc.h"
+#include "DIA_processing.h"
 
 #include "ADM_videoInfoExtractor.h"
 #include "ADM_codecType.h"
 #include "ADM_a52info.h"
+#include "ADM_mp3info.h"
 #include "ADM_audioXiphUtils.h"
 
 #if 1
@@ -239,11 +241,16 @@ MP4Header::~MP4Header()
 {
     close();
 
-	for (int audio = 0; audio < nbAudioTrack; audio++)
-	{
-		delete audioStream[audio];
-		delete audioAccess[audio];
-	}
+    for(int audio = 0; audio < nbAudioTrack; audio++)
+    {
+        delete audioStream[audio];
+        delete audioAccess[audio];
+    }
+    for(int i = 0; i < nbTrex; i++)
+    {
+        delete _trexData[i];
+        _trexData[i] = NULL;
+    }
 }
 uint8_t    MP4Header::close( void )
 {
@@ -268,6 +275,9 @@ MP4Header::MP4Header(void)
         _videoFound=0;
         delayRelativeToVideo=0;
         _flavor=Mp4Regular;
+        nbTrex=0;
+        for(int i=0;i<_3GP_MAX_TRACKS;i++)
+            _trexData[i]=NULL;
 }
 /**
     \fn getAudioInfo
@@ -333,7 +343,7 @@ uint8_t   MP4Header::getExtraHeaderData(uint32_t *len, uint8_t **data)
 //______________________________________
 uint8_t    MP4Header::open(const char *name)
 {
-        printf("** opening 3gpp files **");
+        printf("** opening 3gpp files **\n");
         _fd=ADM_fopen(name,"rb");
         if(!_fd)
         {
@@ -439,39 +449,134 @@ uint8_t    MP4Header::open(const char *name)
                 }
             }else { printf("No extradata to probe\n");}
 
-        }
-        else
-        {
-
-        /*
-            Same story for H263 : Analyze 1st frame to get the real width/height
-        */
-            if(fourCC::check(_videostream.fccHandler,(uint8_t *)"H263"))
+        }else if(fourCC::check(_videostream.fccHandler,(uint8_t *)"H263"))
+        { // Same story for H263 : Analyze 1st frame to get the real width/height
+            uint32_t w,h,sz;
+            uint8_t *bfer=NULL;
+            sz=VDEO.index[0].size;
+            if(sz)
             {
-                uint32_t w,h,sz;
-                uint8_t *bfer=NULL;
-                sz=VDEO.index[0].size;
-                if(sz)
+                bfer=new uint8_t[sz];
+                ADMCompressedImage img;
+                img.data=bfer;
+                if(getFrame(0,&img))
                 {
-                        bfer=new uint8_t[sz];
-                        ADMCompressedImage img;
-                        img.data=bfer;
-                        if(getFrame(0,&img))
-                        {
-                        if(extractH263Info(bfer,sz,&w,&h))
-                        {
-                            printf("H263 Corrected size : %" PRIu32" x %" PRIu32"\n",w,h);
-                            _video_bih.biWidth=_mainaviheader.dwWidth=w ;
-                            _video_bih.biHeight=_mainaviheader.dwHeight=h;
-                        }
-                        else
-                        {
-                                  printf("H263 COULD NOT EXTRACT SIZE, using : %" PRIu32" x %" PRIu32"\n",
-                                      _video_bih.biWidth,  _video_bih.biHeight);
-                        }
-                        }
-                        delete [] bfer;
+                    if(extractH263Info(bfer,sz,&w,&h))
+                    {
+                        printf("H263 Corrected size : %" PRIu32" x %" PRIu32"\n",w,h);
+                        _video_bih.biWidth=_mainaviheader.dwWidth=w ;
+                        _video_bih.biHeight=_mainaviheader.dwHeight=h;
+                    }else
+                    {
+                        printf("H263 COULD NOT EXTRACT SIZE, using : %" PRIu32" x %" PRIu32"\n",
+                        _video_bih.biWidth,  _video_bih.biHeight);
+                    }
                 }
+                delete [] bfer;
+            }
+        }else if(isH264Compatible(_videostream.fccHandler) && VDEO.extraDataSize)
+        { // Get frame type from H.264 slice headers, this is essential for handling of field encoded streams
+            ADM_SPSInfo info;
+            if(extractSPSInfo_mp4Header(VDEO.extraData,VDEO.extraDataSize,&info))
+            {
+                uint32_t nalSize = ADM_getNalSizeH264(VDEO.extraData,VDEO.extraDataSize);
+                uint32_t prevSpsLen=0;
+                uint8_t *prevSps=NULL, *curSps=NULL;
+#define MAX_SPS_SIZE 1024
+#define MAX_FRAME_LENGTH (1920*1080*3) // ~7 MiB, should be enough even for 4K
+                uint8_t *bfer=new uint8_t[MAX_FRAME_LENGTH];
+                ADMCompressedImage img;
+                img.data=bfer;
+                uint32_t i,fields=0,nb=VDEO.nbIndex;
+                uint64_t processed=0;
+                DIA_processingBase *work=createProcessing(QT_TRANSLATE_NOOP("mp4demuxer","Decoding frame type"),nb);
+                for(i=0;i<nb;i++)
+                {
+                    if(work && work->update(1,processed++))
+                        break; // cancelling frame type decoding is non-fatal
+                    if(!getFrame(i,&img))
+                    {
+                        ADM_warning("Could not get frame %u while decoding H.264 frame type.\n",i);
+                        continue;
+                    }
+                    if(img.flags & AVI_KEY_FRAME)
+                    {
+                        // Check for presence of SPS in the stream. If it changes on-the-fly, we are in trouble.
+                        if(!curSps)
+                            curSps=new uint8_t[MAX_SPS_SIZE];
+                        memset(curSps,0,MAX_SPS_SIZE);
+                        uint32_t curSpsLen = getRawH264SPS(img.data, img.dataLength, nalSize, curSps, MAX_SPS_SIZE);
+                        bool match=true;
+                        if(curSpsLen)
+                        {
+                            if(prevSps)
+                            {
+                                if(prevSpsLen)
+                                    match=!memcmp(prevSps,curSps,(prevSpsLen>curSpsLen)? curSpsLen : prevSpsLen);
+                            }else
+                            {
+                                prevSps=new uint8_t[MAX_SPS_SIZE];
+                            }
+                            if(!match)
+                            {
+                                ADM_warning("Codec parameters change at frame %u.\n",i);
+                                printf("\nOld SPS:\n");
+                                mixDump(prevSps,prevSpsLen);
+                                printf("\nNew SPS:\n");
+                                mixDump(curSps,curSpsLen);
+                            }
+                            prevSpsLen=curSpsLen;
+                            memset(prevSps,0,MAX_SPS_SIZE);
+                            memcpy(prevSps,curSps,prevSpsLen);
+                        }
+                        if(!match && curSps)
+                        {
+                            ADM_info("SPS mismatch? Checking deeper...\n");
+                            ADM_SPSInfo info2;
+                            if(extractSPSInfoFromData(curSps,curSpsLen,&info2))
+                            { // check only fields we actually use
+#define MATCH(x) if(info.x != info2.x) { ADM_warning("%s value does not match.\n",#x); info.x = info2.x; match=false; }
+                                match=true;
+                                // FIXME: dimensions mismatch should be fatal
+                                MATCH(CpbDpbToSkip)
+                                MATCH(hasPocInfo)
+                                MATCH(log2MaxFrameNum)
+                                MATCH(log2MaxPocLsb)
+                                MATCH(frameMbsOnlyFlag)
+                                MATCH(refFrames)
+                                if(!match)
+                                    ADM_warning("Codec parameters change on the fly, expect problems.\n");
+                            }
+                        }
+                    }
+                    uint32_t flags;
+                    if(extractH264FrameType(img.data,img.dataLength,nalSize,&flags,NULL,&info))
+                    {
+                        if(flags & AVI_FIELD_STRUCTURE)
+                        {
+                            if(!fields)
+                                printf("First field at frame %u\n",i);
+                            fields++;
+                        }else if(fields==1)
+                        { // discard a single field immediately followed by a frame, probably damaged stream
+                            printf("Resetting fields counter at frame %u\n",i);
+                            fields=0;
+                        }
+                        setFlag(i,flags);
+                    }
+                }
+                if(work) delete work;
+                work=NULL;
+                delete [] bfer;
+                bfer=NULL;
+                if(curSps) delete [] curSps;
+                curSps=NULL;
+                if(prevSps) delete [] prevSps;
+                prevSps=NULL;
+                if(fields)
+                    ADM_info("Field encoded H.264 stream detected, # fields: %u\n",fields);
+                else
+                    ADM_info("Probably a frame encoded H.264 stream.\n");
             }
         }
         /*
@@ -542,6 +647,35 @@ uint8_t    MP4Header::open(const char *name)
                   }
                   delete [] buffer;
                   break;
+            }
+            case WAV_MP3: // same for mp3
+            {
+                MP4Index *dex=_tracks[1+audio].index;
+                int size=dex[0].size;
+                uint8_t *buffer=new uint8_t[size];
+                fseeko(_fd,dex[0].offset,SEEK_SET);
+                if(fread(buffer,1,size,_fd))
+                {
+                    uint32_t off;
+                    MpegAudioInfo mpeg;
+                    if(getMpegFrameInfo(buffer, size, &mpeg, NULL, &off) && size >= off+mpeg.size)
+                    {
+                        if(mpeg.mode == 3 && _tracks[1+audio]._rdWav.channels!=1)
+                        {
+                            uint32_t fq=mpeg.samplerate;
+                            uint32_t br=(mpeg.bitrate*1000)>>3; //
+                            ADM_info("Updating MP3 info : Fq=%u, br=%u, chan=%u\n",fq,br,1);
+                            _tracks[1+audio]._rdWav.channels=1;
+                            _tracks[1+audio]._rdWav.frequency=fq;
+                            _tracks[1+audio]._rdWav.byterate=br;
+                        }
+                    }else
+                    {
+                        ADM_warning("Cannot get MP3 info from the first sample.\n");
+                    }
+                }
+                delete [] buffer;
+                break;
             }
             case WAV_OGG_VORBIS:
             {

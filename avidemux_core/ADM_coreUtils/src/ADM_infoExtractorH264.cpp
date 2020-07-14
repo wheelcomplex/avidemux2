@@ -53,6 +53,9 @@ extern int ff_h264_info(AVCodecParserContext *parser, int ticksPerFrame, ffSpsIn
 #define seiprintf(...) {}
 #endif
 
+extern bool ADM_findAnnexBStartCode(uint8_t *start, uint8_t *end, uint8_t *outstartcode,
+                uint32_t *offset, bool *fivebytes);
+
 /**
     \fn ADM_getH264SpsPpsFromExtraData
     \brief Returns a copy of PPS/SPS extracted from extrdata
@@ -93,8 +96,25 @@ bool ADM_SPSannexBToMP4(uint32_t dataLen,uint8_t *incoming,
     return true;
 }
 
-extern bool ADM_findAnnexBStartCode(uint8_t *start, uint8_t *end, uint8_t *outstartcode,
-                uint32_t *offset, bool *fivebytes);
+/**
+    \fn ADM_getNalSizeH264
+    \brief extract NALU length size from avcC header
+*/
+uint32_t ADM_getNalSizeH264(uint8_t *extra, uint32_t len)
+{
+    if(len < 9)
+    {
+        ADM_warning("Invalid H.264 extradata length %u\n",len);
+        return 0;
+    }
+    if(extra[0] != 1)
+    {
+        ADM_warning("Invalid H.264 extradata\n");
+        return 0;
+    }
+    return (extra[4] & 3) + 1;
+}
+
 /**
     \fn ADM_escapeH264
     \brief Add escape stuff
@@ -588,20 +608,30 @@ static bool getNalType (uint8_t *head, uint8_t *tail, uint32_t *flags, ADM_SPSIn
 
     getBits bits(size,out);
     uint32_t sliceType;
+    uint32_t fieldFlags=0;
     int frame = -1;
     *poc_lsb = -1;
 
     bits.getUEG();               // first mb in slice
     sliceType = bits.getUEG31(); // get_ue_golomb_31??
-    if(sps && sps->hasPocInfo && sps->log2MaxFrameNum > 3 && sps->log2MaxFrameNum < 17) // sanity check
+    if(sps && sps->log2MaxFrameNum > 3 && sps->log2MaxFrameNum < 17) // sanity check
     {
         bits.getUEG(); // skip PPS id
         frame = bits.get(sps->log2MaxFrameNum);
         if(!sps->frameMbsOnlyFlag && bits.get(1))
-            bits.get(1); // skip field_pic_flag
-        if(*flags & AVI_KEY_FRAME) // from NAL
-            bits.getUEG(); // skip idr_pic_id
-        *poc_lsb = bits.get(sps->log2MaxPocLsb);
+        {
+            fieldFlags |= AVI_FIELD_STRUCTURE;
+            if(bits.get(1))
+                fieldFlags |= AVI_BOTTOM_FIELD;
+            else
+                fieldFlags |= AVI_TOP_FIELD;
+        }
+        if(sps->hasPocInfo)
+        {
+            if(*flags & AVI_IDR_FRAME) // from NAL
+                bits.getUEG(); // skip idr_pic_id
+            *poc_lsb = bits.get(sps->log2MaxPocLsb);
+        }
     }
     if (sliceType > 9)
     {
@@ -615,36 +645,51 @@ static bool getNalType (uint8_t *head, uint8_t *tail, uint32_t *flags, ADM_SPSIn
     switch(sliceType)
     {
         case 3:
-        case 0: *flags=  AVI_P_FRAME;break;
+        case 0: *flags = AVI_P_FRAME;break;
         case 1: *flags = AVI_B_FRAME;break;
         case 2: case 4:
-                if(!recovery || !frame) *flags=AVI_KEY_FRAME;
-                    else      *flags=AVI_P_FRAME;
+                if((*flags & AVI_KEY_FRAME) && !sps)
+                    break; // trust NAL when we cannot verify
+                if(!recovery || !frame)
+                    *flags = AVI_KEY_FRAME;
+                else
+                    *flags = AVI_P_FRAME;
+                if(!frame)
+                    *flags |= AVI_IDR_FRAME;
                 break;
 
     }
-
-      free(out);
+    *flags |= fieldFlags;
+    free(out);
     return true;
 }
 
 /**
-      \fn extractH264FrameType
-      \brief return frametype in flags (KEY_FRAME or 0).
-             To be used only with  mkv/mp4 nal type (i.e. no startcode)
-                    but 4 bytes NALU
-
+    \fn extractH264FrameType
+    \brief Parse access unit in buffer of size len, return frametype in flags (KEY/P/B).
+           nalSize should be either the NALU length size value retrieved from extradata or 0 for autodetect.
+           If ADM_SPSInfo is provided, return POC LSB or -1 if implicit or on error.
+           Return value: 1 on success, 0 on failure.
+           To be used only with AVCC (mkv/mp4) nal type (i.e. no startcode)
 */
-uint8_t extractH264FrameType(uint8_t *buffer, uint32_t len, uint32_t *flags, int *pocLsb, ADM_SPSInfo *sps, uint32_t *extRecovery)
+uint8_t extractH264FrameType(uint8_t *buffer, uint32_t len, uint32_t nalSize, uint32_t *flags, int *pocLsb, ADM_SPSInfo *sps, uint32_t *extRecovery)
 {
     uint8_t *head = buffer, *tail = buffer + len;
     uint8_t stream;
+    uint32_t i, length = 0;
 
-    uint32_t nalSize=4;
-// Check for short nalSize, i.e. size coded on 3 bytes
-    {
-        uint32_t length =(head[0] << 24) + (head[1] << 16) + (head[2] << 8) + (head[3]);
-        if(length>len) nalSize=3;
+    if(!nalSize || nalSize > 4)
+    { // Try to detect number of bytes used to code NAL length. Shaky.
+        nalSize = 4;
+        for(i = 0; i < nalSize; i++)
+        {
+            length = (length << 8) + head[i];
+            if(i && length > len)
+            {
+                nalSize = i;
+                break;
+            }
+        }
     }
     uint32_t recovery=0xff;
     int p=-1;
@@ -652,10 +697,9 @@ uint8_t extractH264FrameType(uint8_t *buffer, uint32_t len, uint32_t *flags, int
     *flags=0;
     while (head + nalSize < tail)
     {
-
-        uint32_t length =(head[0] << 16) + (head[1] << 8) + (head[2] << 0) ;
-        if(nalSize==4)
-            length=(length<<8)+head[3];
+        length = 0;
+        for(i = 0; i < nalSize; i++)
+            length = (length << 8) + head[i];
         if (length > len)// || length < 2)
         {
             ADM_warning ("Warning , incomplete nal (%u/%u),(%0x/%0x)\n", length, len, length, len);
@@ -663,6 +707,7 @@ uint8_t extractH264FrameType(uint8_t *buffer, uint32_t len, uint32_t *flags, int
             return 0;
         }
         head += nalSize;        // Skip nal lenth
+        len = (len > nalSize)? len - nalSize : 0;
         int ref=(*(head)>>5) & 3;
         stream = *(head) & 0x1F;
 
@@ -686,12 +731,15 @@ uint8_t extractH264FrameType(uint8_t *buffer, uint32_t len, uint32_t *flags, int
             case NAL_FILLER:
                 break;
             case NAL_IDR:
-                *flags = AVI_KEY_FRAME;
+                *flags = AVI_KEY_FRAME + AVI_IDR_FRAME;
                 if(!getNalType(head+1,head+length,flags,sps,&p,recovery))
                     return 0;
-                if(sps && *flags != AVI_KEY_FRAME)
+                if(sps && !(*flags & AVI_IDR_FRAME))
+                {
                     ADM_warning("Mismatched frame (flags: %d) in IDR NAL unit!\n",*flags);
-                *flags = AVI_KEY_FRAME; // FIXME
+                    *flags &= ~AVI_B_FRAME;
+                    *flags |= AVI_KEY_FRAME; // FIXME
+                }
                 if(pocLsb)
                     *pocLsb=p;
                 return 1;
@@ -708,6 +756,7 @@ uint8_t extractH264FrameType(uint8_t *buffer, uint32_t len, uint32_t *flags, int
                 break;
         }
         head+=length;
+        len = (len > length)? len - length : 0;
     }
     ADM_warning ("No stream\n");
     return 0;
@@ -778,12 +827,15 @@ uint8_t extractH264FrameType_startCode(uint8_t *buffer, uint32_t len, uint32_t *
                 break;
             case NAL_SPS: case NAL_PPS: case NAL_FILLER: case NAL_AU_DELIMITER: break;
             case NAL_IDR:
-                *flags = AVI_KEY_FRAME;
+                *flags = AVI_KEY_FRAME + AVI_IDR_FRAME;
                 if(!getNalType(buffer, buffer+length, flags, sps, &p, recovery))
                     return 0;
-                if(*flags != AVI_KEY_FRAME)
+                if(sps && !(*flags & AVI_IDR_FRAME))
+                {
                     ADM_warning("Mismatched frame (flags: %d) in IDR NAL unit!\n",*flags);
-                *flags = AVI_KEY_FRAME; // FIXME
+                    *flags &= ~AVI_B_FRAME;
+                    *flags |= AVI_KEY_FRAME; // FIXME
+                }
                 if(pocLsb)
                     *pocLsb=p;
                 return 1;
@@ -811,30 +863,39 @@ uint8_t extractH264FrameType_startCode(uint8_t *buffer, uint32_t len, uint32_t *
  *  \fn extractH264SEI
  *  \brief If present, copy SEI containing x264 version info from access unit src to dest
  */
-bool extractH264SEI(uint8_t *src, uint32_t inlen, uint8_t *dest, uint32_t bufsize, uint32_t *outlen)
+bool extractH264SEI(uint8_t *src, uint32_t inlen, uint32_t nalSize, uint8_t *dest, uint32_t bufsize, uint32_t *outlen)
 {
     uint8_t *tail = src, *head = src + inlen;
     uint8_t stream;
+    uint32_t i, length = 0;
 
-    uint32_t nalSize = 4;
-// Check for short nalSize, i.e. size coded on 3 bytes
-    {
-        uint32_t length = (tail[0] << 24) + (tail[1] << 16) + (tail[2] << 8) + tail[3];
-        if(length > inlen) nalSize = 3;
+    if(!nalSize || nalSize > 4)
+    { // Try to detect NAL length size.
+        nalSize = 4;
+        for(i = 0; i < nalSize; i++)
+        {
+            length = (length << 8) + tail[i];
+            if(i && length > inlen)
+            {
+                nalSize = i;
+                break;
+            }
+        }
     }
     uint32_t unregistered = 0;
 
     while(tail + nalSize < head)
     {
-        uint32_t length = (tail[0] << 16) + (tail[1] << 8) + (tail[2] << 0);
-        if(nalSize == 4)
-            length = (length << 8) + tail[3];
+        length = 0;
+        for(i = 0; i < nalSize; i++)
+            length = (length << 8) + tail[i];
         if(length > inlen)
         {
             ADM_warning ("Incomplete NALU, length: %u, available: %u\n", length, inlen);
             return false;
         }
         tail += nalSize;
+        inlen = (inlen > nalSize)? inlen - nalSize : 0;
         stream = *(tail) & 0x1f;
 
         if(stream == NAL_SEI)
@@ -855,6 +916,7 @@ bool extractH264SEI(uint8_t *src, uint32_t inlen, uint8_t *dest, uint32_t bufsiz
             }
         }
         tail += length;
+        inlen = (inlen > length)? inlen - length : 0;
     }
 
     return false;
@@ -963,6 +1025,155 @@ theEnd:
     return r;
 }
 
+/**
+    \fn getRawH264SPS
+    \brief Find the first SPS in mp4 style buffer and copy it to dest, return SPS length.
+*/
+uint32_t getRawH264SPS(uint8_t *data, uint32_t len, uint32_t nalSize, uint8_t *dest, uint32_t maxsize)
+{
+    if(!dest || !maxsize)
+        return 0;
+
+    uint8_t *head=data, *tail=data+len;
+    uint8_t stream;
+
+    uint32_t i, length=0;
+    if(!nalSize || nalSize > 4)
+    { // Try to detect NAL length size.
+        nalSize = 4;
+        for(i = 0; i < nalSize; i++)
+        {
+            length = (length << 8) + head[i];
+            if(i && length > len)
+            {
+                nalSize = i;
+                break;
+            }
+        }
+    }
+
+    while(head + nalSize < tail)
+    {
+        length=0;
+        for(i = 0; i < nalSize; i++)
+            length = (length << 8) + head[i];
+        if(length > len)
+        {
+            ADM_warning ("Incomplete NALU, length: %u, available: %u\n", length, len);
+            return 0;
+        }
+        head += nalSize;
+        len = (len>nalSize)? len-nalSize : 0;
+        stream = *head & 0x1F;
+
+        if(stream == NAL_SPS)
+        {
+            if(length>maxsize)
+            {
+                ADM_warning("Buffer too small for SPS: need %u got %u\n",length,maxsize);
+                return 0;
+            }
+            memcpy(dest,head,length);
+            return length;
+        }
+        head += length;
+        len = (len>length)? len-length : 0;
+    }
+
+    return 0;
+}
+
+/**
+    \fn getRawH264SPS_startCode
+    \brief Find the first SPS in AnnexB style buffer and copy it to dest, return SPS length.
+*/
+uint32_t getRawH264SPS_startCode(uint8_t *data, uint32_t len, uint8_t *dest, uint32_t maxsize)
+{
+    if(!dest || !maxsize)
+        return 0;
+
+    uint8_t *head = data;
+    uint8_t *tail = head + len;
+    uint8_t stream = 0;
+    uint32_t hnt = 0xffffffff;
+    int counter = 0, length = 0;
+    bool last = false;
+#define MAX_NALU_TO_CHECK 4
+    while(head + 2 < tail)
+    {
+        if(counter > MAX_NALU_TO_CHECK)
+            return 0;
+
+        hnt = (hnt << 8) + head[0];
+        if((hnt & 0xffffff) != 1)
+        {
+            head++;
+            if(head + 2 < tail)
+                continue;
+            if(!counter) break;
+            last = true;
+        }
+        length = head - data + 2;
+        uint8_t prevNaluType = 0;
+        if(!last)
+        {
+            head++;
+            counter++;
+            if(counter > 1)
+                length = head - data - 3; // likely one zerobyte too much, harmless
+            prevNaluType = *head & 0x1f;
+            if(!length)
+            {
+                data = head;
+                stream = prevNaluType;
+                continue;
+            }
+        }
+        if(stream == NAL_SPS)
+        {
+            if(length>maxsize)
+            {
+                ADM_warning("Buffer too small for SPS: need %d, got %u\n",length,maxsize);
+                return 0;
+            }
+            memcpy(dest,data,length);
+            return length;
+        }
+        data = head++;
+        stream = prevNaluType;
+    }
+#undef MAX_NALU_TO_CHECK
+    return 0;
+}
+
+/**
+    \fn extractSPSInfoFromData
+    \brief Decode raw SPS data
+*/
+bool extractSPSInfoFromData(uint8_t *data, uint32_t length, ADM_SPSInfo *spsinfo)
+{
+    uint32_t myExtraLen=length+8;
+    uint8_t *myExtra=new uint8_t[myExtraLen];
+    memset(myExtra,0,myExtraLen);
+    uint8_t *p=myExtra;
+    // Create fake avcC extradata
+    *p++=1;       // AVC version
+    *p++=data[1]; // Profile
+    *p++=data[2]; // Profile compatibility
+    *p++=data[3]; // Level
+    *p++=0xff;    // Nal size minus 1
+    *p++=0xe1;    // 1x SPS
+    *p++=length>>8;
+    *p++=length&0xFF;
+    memcpy(p,data,length);
+
+    bool r = extractSPSInfo_mp4Header(myExtra,myExtraLen,spsinfo);
+
+    delete [] myExtra;
+    myExtra=NULL;
+
+    return r;
+}
 
 /**
         \fn extractSPSInfo2

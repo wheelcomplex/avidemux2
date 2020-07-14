@@ -62,7 +62,7 @@ uint8_t   tsIndexer(const char *file)
     //
     // Now extract the datas from audio tracks & verify they are here
     tsPacketLinear *p=new tsPacketLinear(0);
-    p->open(file,FP_DONT_APPEND);
+    p->open(file,0);
     for(int i=1;i<nbTracks;i++)
     {
         tsAudioTrackInfo trk;
@@ -183,14 +183,14 @@ bool TsIndexerBase::writeVideo(TSVideo *video,ADM_TS_TRACK_TYPE trkType)
     \fn writeSystem
     \brief Write system part of index file
 */
-bool TsIndexerBase::writeSystem(const char *filename,bool append)
+bool TsIndexerBase::writeSystem(const char *filename,int append)
 {
     qfprintf(index,"PSD1\n");
     qfprintf(index,"[System]\n");
     qfprintf(index,"Version=%d\n",ADM_INDEX_FILE_VERSION);
     qfprintf(index,"Type=T\n");
     qfprintf(index,"File=%s\n",filename);
-    qfprintf(index,"Append=%d\n",append);
+    qfprintf(index,"Append=%u\n",(uint32_t)append);
     return true;
 }
 /**
@@ -234,6 +234,7 @@ bool TsIndexerBase::dumpUnits(indexerData &data,uint64_t nextConsumed,const dmxP
 {
         // if it contain a SPS or a intra/idr, we start a new line
         bool mustFlush=false;
+        bool picStructFromSei=false;
         int n=listOfUnits.size();
         int picIndex=0;
         H264Unit *unit=&(listOfUnits[0]);
@@ -244,15 +245,18 @@ bool TsIndexerBase::dumpUnits(indexerData &data,uint64_t nextConsumed,const dmxP
         {
             switch(listOfUnits[i].unitType)
             {
-                case unitTypeSps: mustFlush=true;;break;
+                case unitTypeSps: mustFlush=true; break;
                 case unitTypePic: 
                             picIndex=i;
-                            pictStruct=listOfUnits[i].imageStructure;
+                            if(!picStructFromSei)
+                                pictStruct=listOfUnits[i].imageStructure;
+                            picStructFromSei=false;
                             if(listOfUnits[i].imageType==1 || listOfUnits[i].imageType==4)
                                 mustFlush=true;
                             break;
                 case unitTypeSei:
                             pictStruct=listOfUnits[i].imageStructure;
+                            picStructFromSei=true;
                             break;
                 default:
                         ADM_assert(0);
@@ -295,7 +299,7 @@ bool TsIndexerBase::dumpUnits(indexerData &data,uint64_t nextConsumed,const dmxP
                 else deltaDts=pic->dts-data.beginDts;            
 
 
-        qfprintf(index," %c%c",Type[picUnit->imageType],Structure[pictStruct&3]);
+        qfprintf(index," %c%c",Type[picUnit->imageType],Structure[pictStruct%6]);
         int32_t delta=(int32_t)(nextConsumed-beginConsuming);
         
     //    printf("%d -- %d = %d\n",nextConsumed, beginConsuming,delta);
@@ -347,14 +351,12 @@ bool    TsIndexerBase::updateLastUnitStructure(int t)
     H264Unit &lastUnit=listOfUnits[n-1];
     switch(t)
     {
-        case 3: 
-                lastUnit.imageStructure=pictureFrame;
-                break;
-        case 1:  lastUnit.imageStructure=pictureTopField;
-                 break;
-        case 2:  lastUnit.imageStructure=pictureBottomField;
-                 break;
-        default: ADM_warning("frame type 0 met, this is illegal\n");
+        case 3 : lastUnit.imageStructure=pictureFrame;break;
+        case 1 : lastUnit.imageStructure=pictureFieldTop;break;
+        case 2 : lastUnit.imageStructure=pictureFieldBottom;break;
+        case 4 : lastUnit.imageStructure=pictureTopFirst;break;
+        case 5 : lastUnit.imageStructure=pictureBottomFirst;break;
+        default: ADM_warning("frame type %d met, this is illegal\n",t);break;
     }
     return true;
 }

@@ -29,8 +29,12 @@
 decoderFFVP9::decoderFFVP9 (uint32_t w, uint32_t h,uint32_t fcc, uint32_t extraDataLen, uint8_t *extraData,uint32_t bpp)
     : decoderFFSimple(w,h,fcc,extraDataLen,extraData,bpp)
 {
+    _parserContext=NULL;
+    if(!_initCompleted)
+        return;
     _parserContext=av_parser_init(AV_CODEC_ID_VP9);
-    ADM_assert(_parserContext);
+    if(!_parserContext)
+        _initCompleted=false;
 }
 /**
  * \fn dtor

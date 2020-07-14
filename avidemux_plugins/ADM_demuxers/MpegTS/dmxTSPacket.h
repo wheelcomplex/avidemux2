@@ -128,7 +128,7 @@ protected:
 public:
                         tsPacket(void);
     virtual            ~tsPacket();
-    virtual bool        open(const char *filenames,FP_TYPE append);
+    virtual bool        open(const char *filenames, int append);
     virtual bool        close(void);
     virtual bool        getPacket(uint32_t maxSize, uint8_t *pid, uint32_t *packetSize,uint64_t *pts,uint64_t *dts,uint8_t *buffer,uint64_t *startAt);
             bool        getNextPid(int *pid);
@@ -193,12 +193,8 @@ uint8_t readi8(void)
         return pesPacket->payload[pesPacket->offset++];
     }
     if(false==refill()) 
-    {
-        eof=1;
         return 0;
-    }
     return pesPacket->payload[pesPacket->offset++];
-    
 }
 
 /**
@@ -252,15 +248,17 @@ typedef struct
 class tsPacketLinearTracker : public tsPacketLinear
 {
 protected:
-        
         TS_PESpacket *otherPes;
         packetTSStats *stats;
         uint32_t      totalTracks;
+
+        bool    resetStats(void);
 public:
                 tsPacketLinearTracker(uint32_t videoPid,listOfTsAudioTracks *audioTracks);
                 ~tsPacketLinearTracker();
         bool    getStats(uint32_t *nb,packetTSStats **stats);
 virtual bool    updateStats(uint8_t *data);
+        bool    collectStats(void);
         int     findStartCode(void);
         int     findStartCode2(bool &fourBytes);
 };
