@@ -114,9 +114,9 @@ pa_channel_map map,*pmap=NULL;
   ss.rate =_frequency;
  
   instance= pa_simple_new(NULL,               // Use the default server.
-                    "Avidemux2",           // Our application's name.
+                    "Avidemux6",           // Our application's name.
                     PA_STREAM_PLAYBACK,
-                    "bluez_sink.28_F0_33_A4_AE_C1.a2dp_sink",               // Use the default device.
+                    NULL,               // Use the default device.
                     "Sound",            // Description of our stream.
                     &ss,                // Our sample format.
                     pmap,               // Use default channel map
