@@ -74,6 +74,7 @@ int er;
 bool pulseSimpleAudioDevice::localInit(void) 
 {
 ADM_info("Pulse, initiliazing channel=%d samplerate=%d\n",(int)_channels,(int)_frequency);
+printf("Pulse, initiliazing channel=%d samplerate=%d\n",(int)_channels,(int)_frequency);
 pa_simple *s;
 pa_sample_spec ss;
 int er;
@@ -115,7 +116,7 @@ pa_channel_map map,*pmap=NULL;
   instance= pa_simple_new(NULL,               // Use the default server.
                     "Avidemux2",           // Our application's name.
                     PA_STREAM_PLAYBACK,
-                    NULL,               // Use the default device.
+                    "bluez_sink.28_F0_33_A4_AE_C1.a2dp_sink",               // Use the default device.
                     "Sound",            // Description of our stream.
                     &ss,                // Our sample format.
                     pmap,               // Use default channel map
