@@ -1,4 +1,5 @@
 #!/bin/bash
+install_deps=1
 install_packages=1
 default_install_prefix="/usr"
 install_prefix="$default_install_prefix"
@@ -12,6 +13,7 @@ usage()
     echo "  --deps-only       : Just install build dependencies and exit"
     echo "  --prefix=DIR      : Install to directory DIR (default: $default_install_prefix)"
     echo "  --no-install      : Don't install generated debian avidemux packages"
+    echo "  --no-deps         : Skip dependencies installation"
     echo "  --rebuild         : Preserve existing build directories"
 }
 #
@@ -89,6 +91,9 @@ while [ $# != 0 ]; do
         --no-install)
             install_packages=0
             ;;
+        --no-deps)
+            install_deps=0
+            ;;
         --rebuild)
             rebuild="$config_option"
             ;;
@@ -101,7 +106,12 @@ while [ $# != 0 ]; do
     shift
 done
 #
-install_deps
+if [ $install_deps -ne 0 ]
+then
+    install_deps
+else
+    sudo true
+fi
 #
 echo "Compiling avidemux, it will take 20 minutes or so"
 logfile="/tmp/log-bootstrap-$(date +%F_%T).log"

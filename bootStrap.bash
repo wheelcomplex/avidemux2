@@ -158,6 +158,9 @@ dir_check()
 }
 #
 
+# fetch submodule
+git submodule update --init --recursive
+
 export FAKEROOT_COMMAND="fakeroot"
 CMAKE_VERSION=`cmake --version | head -n 1 | sed "s/^.* \([0-9]*\.[0-9]*\.[0-9]*\).*/\1/g"`
 echo "CMAKE Version : $CMAKE_VERSION"
